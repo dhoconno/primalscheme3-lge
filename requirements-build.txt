@@ -1,0 +1,6 @@
+# Exact tools used by scripts/build_lge_wheel.py (Python 3.12.11).
+hatchling==1.27.0
+packaging==26.3
+pathspec==1.1.1
+pluggy==1.6.0
+trove-classifiers==2026.6.1.19

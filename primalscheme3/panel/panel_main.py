@@ -485,6 +485,8 @@ def panelcreate(
     # Add the bedfile to the cfg
     config_dict["region_bedfile"] = str(region_bedfile)
     config_dict["input_bedfile"] = str(input_bedfile)
+    config_dict["discovery_core_count"] = config.discovery_core_count
+    config_dict["discovery_workers_by_msa"] = dict(config.discovery_workers_by_msa)
     with open(OUTPUT_DIR / "config.json", "w") as outfile:
         outfile.write(json.dumps(config_dict, sort_keys=True))
 

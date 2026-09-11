@@ -1,3 +1,22 @@
+# PrimalScheme3-LGE — custom fork
+
+**This is a separately maintained LGE custom fork, not an upstream PrimalScheme3 release.** It is based on [artic-network/primalscheme3](https://github.com/artic-network/primalscheme3) v3.3.0 and retains upstream authorship and GPL-3.0 licensing.
+
+The custom distribution version is **3.3.0+lge.1**. Its executable remains `primalscheme3`, but `--version` identifies **PrimalScheme3-LGE**. Obtain the custom wheel and source from [GitHub releases](https://github.com/dhoconno/primalscheme3-lge/releases); installing the ordinary PyPI `primalscheme3` package does not select this fork.
+
+The fork adds an explicit `--terminal-gap-policy` to `scheme-create` and `panel-create`:
+
+- `legacy` preserves upstream Rust discovery and is the standalone CLI default.
+- `observed-only` uses the patched Python discovery path, treating missing terminal observations as unavailable data while retaining observed internal sequence information.
+
+The observed-only path supports **multiple worker processes** through `--ncores`. Work is bounded by requested workers, available CPUs and work chunks, and results are reconstructed in stable position order. Each worker has an alignment copy, so more workers use more memory. Small inputs can be dominated by process startup and downstream work.
+
+Native configuration records the policy, discovery backend and effective worker counts. This is a backend change as well as a missing-data change; comparisons must not be described as changing only a denominator. Missing observations are not evidence that an allele matches a primer.
+
+See [custom behavior, installation and validation](docs/lge-fork.md), [reproducible build script](scripts/build_lge_wheel.py), and [license](LICENSE). The upstream documentation below is retained for reference; its ordinary PyPI/source installation instructions refer to upstream unless the custom GitHub release is selected explicitly.
+
+---
+
 # Primalscheme3
 
 [![CI](https://github.com/ChrisgKent/primalscheme3/actions/workflows/pytest.yml/badge.svg)](https://github.com/ChrisgKent/primalscheme3/actions/workflows/pytest.yml) [![Generic badge](https://img.shields.io/badge/DOI-10.1101/2024.12.20.629611-blue.svg)](https://doi.org/10.1101/2024.12.20.629611)

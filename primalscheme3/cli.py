@@ -8,7 +8,7 @@ from typing import Annotated
 import typer
 
 # Module imports
-from primalscheme3.core.config import Config, MappingType
+from primalscheme3.core.config import Config, MappingType, TerminalGapPolicy
 from primalscheme3.core.downsample import downsample_scheme
 from primalscheme3.core.msa import parse_msa
 from primalscheme3.core.primer_visual import bedfile_plot_html, primer_mismatch_heatmap
@@ -61,7 +61,7 @@ def typer_callback_version(value: bool):
         version_str = typer.style(
             version("primalscheme3"), fg=typer.colors.GREEN, bold=True
         )
-        typer.echo("PrimalScheme3 version: " + version_str)
+        typer.echo("PrimalScheme3-LGE version: " + version_str)
         raise typer.Exit()
 
 
@@ -122,6 +122,10 @@ def scheme_create(
             help="Threshold for dimer interaction",
         ),
     ] = Config.dimer_score,
+    terminal_gap_policy: Annotated[
+        TerminalGapPolicy,
+        typer.Option(help="LGE custom policy: legacy uses upstream Rust; observed-only uses Python discovery, excluding terminal missing coverage without imputation. Internal gaps remain observations."),
+    ] = TerminalGapPolicy.LEGACY,
     min_base_freq: Annotated[
         float,
         typer.Option(help="Min freq to be included,[0<=x<=1]", min=0.0, max=1.0),
@@ -365,6 +369,10 @@ def panel_create(
     dimer_score: Annotated[
         float, typer.Option(help="Threshold for dimer interaction")
     ] = Config.dimer_score,
+    terminal_gap_policy: Annotated[
+        TerminalGapPolicy,
+        typer.Option(help="LGE custom policy: legacy uses upstream Rust; observed-only uses Python discovery, excluding terminal missing coverage without imputation. Internal gaps remain observations."),
+    ] = TerminalGapPolicy.LEGACY,
     min_base_freq: Annotated[
         float,
         typer.Option(help="Min freq to be included,[0<=x<=1]", min=0.0, max=1.0),

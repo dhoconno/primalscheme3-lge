@@ -12,8 +12,8 @@ from primalschemers import (
 )
 
 from primalscheme3.core.classes import PrimerPair
-from primalscheme3.core.config import IUPAC_ALL_ALLOWED_DNA, Config, MappingType
-from primalscheme3.core.digestion import digest, generate_valid_primerpairs
+from primalscheme3.core.config import IUPAC_ALL_ALLOWED_DNA, Config, MappingType, TerminalGapPolicy
+from primalscheme3.core.digestion import generate_valid_primerpairs
 from primalscheme3.core.downsample import downsample_kmer
 from primalscheme3.core.errors import (
     MSAFileInvalid,
@@ -226,6 +226,14 @@ class MSA:
         Raises:
             ValueError: If chrom name does not match expected regex or is too long.
         """
+        if config.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY:
+            if config.downsample or config.use_annealing:
+                raise ValueError("observed-only Python discovery does not support experimental downsampling or annealing mode")
+            if self.logger:
+                self.logger.info("LGE observed-only policy: Python process discovery; terminal missing coverage excluded without imputation")
+            self.digest(config, indexes)
+            return
+
         if indexes is None:
             indexes: tuple[None, None] = (None, None)
 
@@ -320,33 +328,44 @@ class MSA:
         :param indexes: A tuple of MSA indexes for (FKmers, RKmers), or False to use all indexes.
         :return: None (Class is updated inplace)
         """
-        # Create all the kmers
-        self.fkmers, self.rkmers = digest(
-            msa_array=self.array,
-            config=config,
-            indexes=indexes,
-            logger=self.logger,
-            progress_manager=self.progress_manager,
-            chrom=self.name,
-        )
-        # remap the fkmer and rkmers if needed
-        if self._mapping_array is not None:
-            mapping_set = set(self._mapping_array)
+        from primalscheme3.core.parallel_discovery import discover
 
-            remaped_fkmers = [fkmer.remap(self._mapping_array) for fkmer in self.fkmers]  # type: ignore
-            self.fkmers = [
-                x
-                for x in remaped_fkmers
-                if x is not None and x.end in mapping_set and min(x.starts()) >= 0
-            ]
-            remaped_rkmers = [rkmer.remap(self._mapping_array) for rkmer in self.rkmers]  # type: ignore
-            self.rkmers = [
-                x
-                for x in remaped_rkmers
-                if x is not None
-                and x.start in mapping_set
-                and max(x.ends()) < self.array.shape[1]
-            ]
+        (self.fkmers, self.rkmers), workers = discover(
+            self.array, config, self.progress_manager, indexes, self.logger, self.name
+        )
+        config.discovery_workers_by_msa[str(self.msa_index)] = workers
+        # primalschemers >=0.1.13 remap mutates in place and takes a scalar.
+        # Forward endpoints are exclusive; both oligo bounds must lie within
+        # the selected reference. Missing terminal reference bases are not imputed.
+        if self._mapping_array is not None:
+            mapping = self._mapping_array
+            observed = [int(x) for x in mapping if x is not None]
+            reference_length = max(observed, default=-1) + 1
+            remapped_forward = []
+            for kmer in self.fkmers:
+                if not 0 < kmer.end <= len(mapping):
+                    continue
+                last = mapping[kmer.end - 1]
+                if last is None:
+                    continue
+                end = int(last) + 1
+                if end < max(map(len, kmer.seqs()), default=0):
+                    continue
+                kmer.remap(end)
+                remapped_forward.append(kmer)
+            remapped_reverse = []
+            for kmer in self.rkmers:
+                if not 0 <= kmer.start < len(mapping):
+                    continue
+                first = mapping[kmer.start]
+                if first is None:
+                    continue
+                start = int(first)
+                if start + max(map(len, kmer.seqs()), default=0) > reference_length:
+                    continue
+                kmer.remap(start)
+                remapped_reverse.append(kmer)
+            self.fkmers, self.rkmers = remapped_forward, remapped_reverse
 
     def set_reference_genome(self, mapping: MappingType | int):
         """

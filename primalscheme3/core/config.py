@@ -14,6 +14,13 @@ class MappingType(Enum):
     CONSENSUS = "consensus"
 
 
+class TerminalGapPolicy(str, Enum):
+    """Explicit CLI discovery policy; legacy retains the upstream Rust backend."""
+
+    LEGACY = "legacy"
+    OBSERVED_ONLY = "observed-only"
+
+
 PRIMER_COUNT_ATTR_STRING = "pc"
 
 
@@ -23,6 +30,16 @@ class Config:
     Class properties are defaults, can be overridden
     on instantiation (and will shadow class defaults)
     """
+
+    terminal_gap_policy: TerminalGapPolicy = TerminalGapPolicy.LEGACY
+
+    @property
+    def discovery_backend(self) -> str:
+        return "python-observed-only" if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY else "rust-legacy"
+
+    @property
+    def discovery_core_count(self) -> int:
+        return max(self.discovery_workers_by_msa.values(), default=0) if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY else self.ncores
 
     # Run Settings
     output: pathlib.Path = pathlib.Path("./output")
@@ -83,7 +100,10 @@ class Config:
     dimer_score: float = -26.0
 
     def __init__(self, **kwargs: Any) -> None:
+        self.discovery_workers_by_msa = {}
         self.assign_kwargs(**kwargs)
+        if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY and (self.downsample or self.use_annealing):
+            raise ValueError("observed-only Python discovery does not support experimental downsampling or annealing mode")
         # Set amplicon size
         if self.amplicon_size_min == 0:
             self.amplicon_size_min = int(self.amplicon_size * 0.9)
@@ -146,13 +166,18 @@ class Config:
             if value is None:
                 continue
 
+            if key in {"discovery_backend", "discovery_core_count", "discovery_workers_by_msa"}:
+                continue  # Computed from effective policy, never caller-controlled.
+
             if key == "input_bedfile":
                 setattr(self, key, pathlib.Path(value))
                 continue
 
             if hasattr(self, key):
                 # Convert to expected type
-                if isinstance(getattr(self, key), MappingType):
+                if isinstance(getattr(self, key), TerminalGapPolicy):
+                    setattr(self, key, TerminalGapPolicy(value))
+                elif isinstance(getattr(self, key), MappingType):
                     setattr(self, key, MappingType(value))
                 elif isinstance(getattr(self, key), pathlib.Path):
                     setattr(self, key, pathlib.Path(value))

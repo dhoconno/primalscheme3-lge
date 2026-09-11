@@ -19,6 +19,12 @@ class GapOnSetBase(CustomErrors):
     pass
 
 
+class EndOfSequence(CustomErrors):
+    """The candidate primer site falls outside this sequence's coverage."""
+
+    pass
+
+
 class ContainsInvalidBase(CustomErrors):
     """
     Contains an invalid base

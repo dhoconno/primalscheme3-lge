@@ -15,6 +15,7 @@ from primalscheme3.core.errors import (
     ContainsInvalidBase,
     CustomErrors,
     CustomRecursionError,
+    EndOfSequence,
     GapOnSetBase,
     WalksOut,
     WalksTooFar,
@@ -23,7 +24,6 @@ from primalscheme3.core.get_window import get_r_window_FAST2
 from primalscheme3.core.progress_tracker import ProgressManager
 from primalscheme3.core.seq_functions import (
     expand_ambs,
-    get_most_common_base,
     reverse_complement,
 )
 from primalscheme3.core.thermo import (
@@ -50,6 +50,7 @@ class DIGESTION_ERROR(Enum):
     WALK_TO_FAR = "WalkToFar"  # When indels causes the walk to go to far
     AMB_FAIL = "AmbFail"  # Generic error for when the error is unknown
     NO_SEQUENCES = "NoSequences"
+    END_OF_SEQUENCE = "EndOfSequence"
 
 
 class DIGESTION_RESULT:
@@ -83,10 +84,12 @@ def parse_error(results: set[CustomErrors | str]) -> DIGESTION_ERROR:
     """
     Parses the error set for the error that occurred
     As only one error is returned, there is an arbitrary hierarchy of errors
-    - CONTAINS_INVALID_BASE > GAP_ON_SET_BASE > WALKS_OUT > CUSTOM_RECURSION_ERROR > WALK_TO_FAR > CUSTOM_ERRORS
+    - CONTAINS_INVALID_BASE > END_OF_SEQUENCE > GAP_ON_SET_BASE > WALKS_OUT > CUSTOM_RECURSION_ERROR > WALK_TO_FAR > CUSTOM_ERRORS
     """
     if ContainsInvalidBase() in results:
         return DIGESTION_ERROR.CONTAINS_INVALID_BASE
+    elif EndOfSequence() in results:
+        return DIGESTION_ERROR.END_OF_SEQUENCE
     elif GapOnSetBase() in results:
         return DIGESTION_ERROR.GAP_ON_SET_BASE
     elif WalksOut() in results:
@@ -212,10 +215,12 @@ def walk_right(
 
     new_base = array[row_index, col_index_right]
 
-    # Fix incomplete ends
+    # Terminal padding is missing coverage, not a base to impute.
     if new_base == "":
-        new_base = get_most_common_base(array, col_index_right + 1)
-    new_string = (seq_str + new_base).replace("-", "")
+        raise EndOfSequence()
+    if new_base == "-":
+        raise GapOnSetBase()
+    new_string = seq_str + new_base
 
     # Prevent Ns from being added
     if "N" in new_string:
@@ -293,10 +298,12 @@ def walk_left(
 
     new_base = array[row_index, col_index_left - 1]
 
-    # Ensure it can repair truncated regions
+    # Terminal padding is missing coverage, not a base to impute.
     if new_base == "":
-        new_base = get_most_common_base(array, col_index_left - 1)
-    new_string = (new_base + seq_str).replace("-", "")
+        raise EndOfSequence()
+    if new_base == "-":
+        raise GapOnSetBase()
+    new_string = new_base + seq_str
 
     # Guard prevents seqs with an N
     if "N" in new_string:
@@ -362,7 +369,7 @@ def r_digest_to_result(
 
     ### Process early return conditions
     # If the initial slice is outside the range of the array
-    if start_col + config.primer_size_min >= align_array.shape[1]:
+    if start_col + config.primer_size_min > align_array.shape[1]:
         return (
             start_col,
             [DIGESTION_RESULT(DIGESTION_ERROR.WALKS_OUT, EARLY_RETURN_FREQ, None)],
@@ -373,11 +380,12 @@ def r_digest_to_result(
     first_base_counter = dict(zip(base, counts, strict=False))
     first_base_counter.pop("", None)
 
-    num_seqs = np.sum(counts)
+    num_seqs = sum(first_base_counter.values())
     first_base_freq = {k: v / num_seqs for k, v in first_base_counter.items()}
 
     # If the freq of gap is above minfreq
-    if first_base_freq.get("-", 0) > min_freq:
+    gap_freq = first_base_freq.get("-")
+    if gap_freq is not None and gap_freq >= min_freq:
         return (
             start_col,
             [
@@ -391,6 +399,10 @@ def r_digest_to_result(
     # Create a counter
     total_col_seqs: Counter[str | DIGESTION_ERROR] = Counter()
     for row_index in range(0, align_array.shape[0]):
+        if align_array[row_index, start_col] == "":
+            total_col_seqs.update([DIGESTION_ERROR.END_OF_SEQUENCE])
+            continue
+
         # Check if this row starts on a gap, and if so update the counter and skip
         if align_array[row_index, start_col] == "-":
             total_col_seqs.update([DIGESTION_ERROR.GAP_ON_SET_BASE])
@@ -399,7 +411,13 @@ def r_digest_to_result(
         start_array = align_array[
             row_index, start_col : start_col + config.primer_size_min
         ]
-        start_seq = "".join(start_array).replace("-", "")
+        if "" in start_array:
+            total_col_seqs.update([DIGESTION_ERROR.END_OF_SEQUENCE])
+            continue
+        if "-" in start_array:
+            total_col_seqs.update([DIGESTION_ERROR.GAP_ON_SET_BASE])
+            continue
+        start_seq = "".join(start_array)
 
         if not start_seq:  # If the start seq is empty go to the next row
             continue
@@ -486,11 +504,18 @@ def process_results(
             if dr.seq != DIGESTION_ERROR.CONTAINS_INVALID_BASE
         ]
 
-    # Filter out values below the threshold freq
-    total_values = sum([dr.count for dr in digestion_results])
+    # Terminal padding is missing coverage. It neither contributes to the
+    # frequency denominator nor participates in primer acceptance/rejection.
+    covered_results = [
+        dr for dr in digestion_results if dr.seq != DIGESTION_ERROR.END_OF_SEQUENCE
+    ]
+    total_values = sum(dr.count for dr in covered_results)
+
+    if total_values == 0:
+        return []
 
     results_above_freq: list[DIGESTION_RESULT] = [
-        dr for dr in digestion_results if dr.count / total_values > min_freq
+        dr for dr in covered_results if dr.count / total_values >= min_freq
     ]
 
     # Check for Digestion Errors above the threshold
@@ -545,7 +570,7 @@ def r_digest_index(
         return (start_col, DIGESTION_ERROR.DIMER_FAIL)
 
     # All checks pass return the kmer
-    return RKmer(seqs, start_col)
+    return RKmer(seqs, start_col, [dr.count for dr in parsed_digestion_results])
 
 
 def f_digest_to_result(
@@ -560,18 +585,17 @@ def f_digest_to_result(
     """
 
     # Check for gap frequency on first base
-    base, counts = np.unique(
-        align_array[:, end_col], return_counts=True
-    )  # -1 for non-inclusive end
+    base, counts = np.unique(align_array[:, end_col - 1], return_counts=True)
     first_base_counter = dict(zip(base, counts, strict=False))
     first_base_counter.pop("", None)
 
-    num_seqs = np.sum(counts)
+    num_seqs = sum(first_base_counter.values())
 
     first_base_freq = {k: v / num_seqs for k, v in first_base_counter.items()}
 
     # If the freq of gap is above minfreq
-    if first_base_freq.get("-", 0) > min_freq:
+    gap_freq = first_base_freq.get("-")
+    if gap_freq is not None and gap_freq >= min_freq:
         return (
             end_col,
             [
@@ -590,15 +614,24 @@ def f_digest_to_result(
 
     total_col_seqs: Counter[str | DIGESTION_ERROR] = Counter()
     for row_index in range(0, align_array.shape[0]):
+        if align_array[row_index, end_col - 1] == "":
+            total_col_seqs.update([DIGESTION_ERROR.END_OF_SEQUENCE])
+            continue
+
         # Check if this row starts on a gap, and if so update the counter and skip
-        if align_array[row_index, end_col] == "-":
+        if align_array[row_index, end_col - 1] == "-":
             total_col_seqs.update([DIGESTION_ERROR.GAP_ON_SET_BASE])
             # Skip to next row
             continue
 
-        start_seq = "".join(
-            align_array[row_index, end_col - config.primer_size_min : end_col]
-        ).replace("-", "")
+        start_array = align_array[row_index, end_col - config.primer_size_min : end_col]
+        if "" in start_array:
+            total_col_seqs.update([DIGESTION_ERROR.END_OF_SEQUENCE])
+            continue
+        if "-" in start_array:
+            total_col_seqs.update([DIGESTION_ERROR.GAP_ON_SET_BASE])
+            continue
+        start_seq = "".join(start_array)
 
         if not start_seq:  # If the start seq is empty go to the next row
             continue
@@ -697,7 +730,7 @@ def f_digest_index(
     if not parsed_digestion_results:
         return (end_col, DIGESTION_ERROR.NO_SEQUENCES)
 
-    return FKmer(seqs, end_col)
+    return FKmer(seqs, end_col, [dr.count for dr in parsed_digestion_results])
 
 
 def hamming_dist(s1, s2) -> int:
@@ -767,7 +800,7 @@ def digest(
     """
     # Guard for invalid indexes
     if indexes is not None:
-        if min(indexes[0]) < 0 or max(indexes[0]) >= msa_array.shape[1]:
+        if min(indexes[0]) < 0 or max(indexes[0]) > msa_array.shape[1]:
             raise IndexError("FIndexes are out of range")
         if min(indexes[1]) < 0 or max(indexes[1]) >= msa_array.shape[1]:
             raise IndexError("RIndexes are out of range")
@@ -776,12 +809,12 @@ def digest(
     findexes = (
         indexes[0]
         if indexes is not None
-        else range(config.primer_size_min, msa_array.shape[1])
+        else range(config.primer_size_min, msa_array.shape[1] + 1)
     )
     rindexes = (
         indexes[1]
         if indexes is not None
-        else range(msa_array.shape[1] - config.primer_size_min)
+        else range(msa_array.shape[1] - config.primer_size_min + 1)
     )
 
     # Digest the findexes

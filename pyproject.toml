@@ -1,7 +1,7 @@
 [project]
 name = "primalscheme3"
-version = "3.3.0"
-description = "Generation of highly multiplexed primer schemes"
+version = "3.3.0+lge.1"
+description = "PrimalScheme3-LGE custom fork with explicit terminal missing-coverage policy"
 authors = [{ name = "ChrisKent", email = "chrisgkent@gmail.com" }]
 requires-python = ">=3.11,<3.14"
 readme = "README.md"
@@ -15,13 +15,14 @@ dependencies = [
     "typer>=0.16.1,<0.17",
     "dnaio>=1.2.3,<2",
     "matplotlib>=3.10.5,<4",
-    "primalschemers>=0.1.10,<0.2",
+    "primalschemers==0.1.13",
     "numpy>=2.3.0",
     "primalbedtools>=1.0.0",
 ]
 
 [project.urls]
-Repository = "https://github.com/artic-network/primalscheme3"
+Repository = "https://github.com/dhoconno/primalscheme3-lge"
+Upstream = "https://github.com/artic-network/primalscheme3"
 
 [project.scripts]
 primalscheme3 = "primalscheme3.cli:app"
@@ -47,7 +48,7 @@ default-groups = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.ruff.lint]

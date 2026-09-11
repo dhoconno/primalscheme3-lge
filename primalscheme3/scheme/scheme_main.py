@@ -350,6 +350,8 @@ def schemecreate(
     cfg_dict["reference.fasta.md5"] = ref_md5
 
     # Write the config dict to file
+    cfg_dict["discovery_core_count"] = config.discovery_core_count
+    cfg_dict["discovery_workers_by_msa"] = dict(config.discovery_workers_by_msa)
     with open(OUTPUT_DIR / "config.json", "w") as outfile:
         outfile.write(json.dumps(cfg_dict, sort_keys=True))
 
