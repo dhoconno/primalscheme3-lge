@@ -8,7 +8,7 @@ from typing import Annotated
 import typer
 
 # Module imports
-from primalscheme3.core.config import Config, MappingType, TerminalGapPolicy
+from primalscheme3.core.config import AmpliconSizeMetric, Config, MappingType, TerminalGapPolicy
 from primalscheme3.core.downsample import downsample_scheme
 from primalscheme3.core.msa import parse_msa
 from primalscheme3.core.primer_visual import bedfile_plot_html, primer_mismatch_heatmap
@@ -56,6 +56,24 @@ def check_output_dir(output: pathlib.Path, force: bool):
         )
 
 
+def create_config_with_amplicon_bounds(params: dict) -> Config:
+    """Only explicit creation flags opt in; old saved bounds retain their metric."""
+    metric = (
+        AmpliconSizeMetric.REFERENCE_SPAN
+        if any(params.get(key) is not None for key in ("amplicon_size_min", "amplicon_size_max"))
+        else AmpliconSizeMetric.LEGACY_PAIRING
+    )
+    if metric == AmpliconSizeMetric.REFERENCE_SPAN:
+        if params.get("bedfile") is not None:
+            raise typer.BadParameter("reference-span amplicon bounds do not support imported primer pairs (--bedfile)")
+        if params.get("region_bedfile") is not None or params.get("mode") == PanelRunModes.REGION_ONLY:
+            raise typer.BadParameter("reference-span amplicon bounds require a whole-MSA equal or entropy panel without regions")
+    try:
+        return Config(**params, amplicon_size_metric=metric)
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
 def typer_callback_version(value: bool):
     if value:
         version_str = typer.style(
@@ -95,11 +113,19 @@ def scheme_create(
     amplicon_size: Annotated[
         int,
         typer.Option(
-            help="The size of an amplicon. Min / max size are ± 10 percent [100<=x<=2000]",
+            help="Nominal amplicon size; omitted bounds resolve to ±10 percent. Does not rank by target proximity.",
             min=100,
             max=2000,
         ),
     ] = Config.amplicon_size,
+    amplicon_size_min: Annotated[
+        int | None,
+        typer.Option(help="Inclusive minimum full reference BED span, including primers. Enables reference-span pairing.", min=1),
+    ] = None,
+    amplicon_size_max: Annotated[
+        int | None,
+        typer.Option(help="Inclusive maximum full reference BED span, including primers. Enables reference-span pairing.", min=1),
+    ] = None,
     bedfile: Annotated[
         pathlib.Path | None,
         typer.Option(
@@ -200,7 +226,7 @@ def scheme_create(
     Creates a tiling overlap scheme for each MSA file
     """
     # Update the config with CLI params
-    config = Config(**locals())
+    config = create_config_with_amplicon_bounds(locals())
 
     # Check the output directory
     check_output_dir(output, force)
@@ -361,8 +387,16 @@ def panel_create(
         ),
     ] = PanelRunModes.REGION_ONLY.value,  # type: ignore
     amplicon_size: Annotated[
-        int, typer.Option(help="The size of an amplicon")
+        int, typer.Option(help="Nominal amplicon size; omitted bounds resolve to ±10 percent. Does not rank by target proximity.", min=100, max=2000)
     ] = Config.amplicon_size,
+    amplicon_size_min: Annotated[
+        int | None,
+        typer.Option(help="Inclusive minimum full reference BED span, including primers. Enables reference-span pairing.", min=1),
+    ] = None,
+    amplicon_size_max: Annotated[
+        int | None,
+        typer.Option(help="Inclusive maximum full reference BED span, including primers. Enables reference-span pairing.", min=1),
+    ] = None,
     n_pools: Annotated[
         int, typer.Option(help="Number of pools to use", min=1)
     ] = Config.n_pools,
@@ -439,7 +473,7 @@ def panel_create(
     Creates a primer panel
     """
     # Update the config with CLI params
-    config = Config(**locals())
+    config = create_config_with_amplicon_bounds(locals())
 
     # Check the output directory
     check_output_dir(output, force)

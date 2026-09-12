@@ -60,27 +60,58 @@ def _evaluate_chunk(chunk):
 @contextmanager
 def _termination_cleanup():
     # The app may terminate the parent process rather than its process group.
-    # Unwind the Pool context so children are terminated and joined in either case.
+    # Python dispatches process signals on the main thread even when another
+    # unblocked thread received them. Defer exceptions until Pool ownership is
+    # established; a main-thread pthread mask alone cannot protect construction.
     can_handle = threading.current_thread() is threading.main_thread()
-    previous = signal.getsignal(signal.SIGTERM) if can_handle else None
-    def terminate(signum, frame):
-        raise KeyboardInterrupt('Discovery terminated')
+    signals = (signal.SIGTERM, signal.SIGINT)
+    previous = {sig: signal.getsignal(sig) for sig in signals} if can_handle else {}
+    deferred = True
+    pending = set()
+
+    def interrupt(signum, frame):
+        nonlocal deferred
+        if signum == signal.SIGINT and previous[signum] == signal.SIG_IGN:
+            return
+        if deferred:
+            pending.add(signum)
+            return
+        # Further signals must not interrupt termination/join after this raises.
+        deferred = True
+        if signum == signal.SIGTERM:
+            raise KeyboardInterrupt('Discovery terminated')
+        if callable(previous[signum]):
+            previous[signum](signum, frame)
+        else:
+            raise KeyboardInterrupt('Discovery interrupted')
+        deferred = False
+
+    def defer_interruptions(value):
+        nonlocal deferred
+        deferred = value
+        if not deferred:
+            queued = sorted(pending, reverse=True)  # Termination precedes SIGINT.
+            pending.clear()
+            for signum in queued:
+                interrupt(signum, None)
+
     if can_handle:
-        signal.signal(signal.SIGTERM, terminate)
+        for sig in signals:
+            signal.signal(sig, interrupt)
     try:
-        yield
+        yield defer_interruptions
     finally:
         if can_handle:
-            signal.signal(signal.SIGTERM, previous)
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
 
 
 def pool_results(chunks, array, config, workers):
-    with _termination_cleanup():
+    with _termination_cleanup() as defer_interruptions:
         pool = None
         try:
-            # Do not interrupt Pool.__init__ between spawning its first child
-            # and assigning ownership. Workers restore the inherited mask only
-            # after installing their own signal handlers.
+            # Keep new workers protected until they install their own signal
+            # handlers. The Python handler also defers parent interruptions.
             blocked = {signal.SIGTERM, signal.SIGINT}
             old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, blocked) if hasattr(signal, 'pthread_sigmask') else None
             try:
@@ -91,8 +122,10 @@ def pool_results(chunks, array, config, workers):
             finally:
                 if old_mask is not None:
                     signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+            defer_interruptions(False)
             yield from pool.imap(_evaluate_chunk, chunks, chunksize=1)
         finally:
+            defer_interruptions(True)
             if pool is not None:
                 pool.terminate()
                 pool.join()

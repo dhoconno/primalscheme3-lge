@@ -48,7 +48,7 @@ def main():
     metadata = {
         'schemaVersion': 1,
         'distribution': 'primalscheme3',
-        'version': '3.3.0+lge.1',
+        'version': '3.3.0+lge.2',
         'sourceRepository': 'https://github.com/dhoconno/primalscheme3-lge',
         'sourceCommit': commit,
         'upstreamRepository': 'https://github.com/artic-network/primalscheme3',

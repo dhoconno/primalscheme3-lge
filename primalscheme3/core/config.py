@@ -21,6 +21,13 @@ class TerminalGapPolicy(str, Enum):
     OBSERVED_ONLY = "observed-only"
 
 
+class AmpliconSizeMetric(str, Enum):
+    """Persisted size interpretation, independent of discovery backend."""
+
+    LEGACY_PAIRING = "legacy-pairing"
+    REFERENCE_SPAN = "reference-span"
+
+
 PRIMER_COUNT_ATTR_STRING = "pc"
 
 
@@ -64,6 +71,7 @@ class Config:
     amplicon_size: int = 400
     amplicon_size_min: int = 0
     amplicon_size_max: int = 0
+    amplicon_size_metric: AmpliconSizeMetric = AmpliconSizeMetric.LEGACY_PAIRING
     # Primer Settings
     _primer_size_default_min: int = 19
     _primer_size_default_max: int = 36
@@ -104,11 +112,22 @@ class Config:
         self.assign_kwargs(**kwargs)
         if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY and (self.downsample or self.use_annealing):
             raise ValueError("observed-only Python discovery does not support experimental downsampling or annealing mode")
+        if self.amplicon_size_metric == AmpliconSizeMetric.REFERENCE_SPAN:
+            for bound in ("amplicon_size_min", "amplicon_size_max"):
+                if kwargs.get(bound) is not None and getattr(self, bound) <= 0:
+                    raise ValueError("Explicit amplicon size bounds must be positive")
         # Set amplicon size
         if self.amplicon_size_min == 0:
             self.amplicon_size_min = int(self.amplicon_size * 0.9)
         if self.amplicon_size_max == 0:
             self.amplicon_size_max = int(self.amplicon_size * 1.1)
+        if self.amplicon_size_metric == AmpliconSizeMetric.REFERENCE_SPAN:
+            if not 0 < self.amplicon_size_min <= self.amplicon_size <= self.amplicon_size_max:
+                raise ValueError("Amplicon sizes must satisfy 0 < minimum <= nominal target <= maximum")
+            if self.mapping != MappingType.FIRST:
+                raise ValueError("reference-span amplicon bounds require --mapping first; consensus mapping uses alignment columns")
+            if self.circular or self.input_bedfile is not None:
+                raise ValueError("reference-span amplicon bounds require fresh linear design without imported primer pairs")
         if self.high_gc:
             self.primer_size_min = self._primer_size_hgc_min
             self.primer_size_max = self._primer_size_hgc_max
@@ -177,6 +196,8 @@ class Config:
                 # Convert to expected type
                 if isinstance(getattr(self, key), TerminalGapPolicy):
                     setattr(self, key, TerminalGapPolicy(value))
+                elif isinstance(getattr(self, key), AmpliconSizeMetric):
+                    setattr(self, key, AmpliconSizeMetric(value))
                 elif isinstance(getattr(self, key), MappingType):
                     setattr(self, key, MappingType(value))
                 elif isinstance(getattr(self, key), pathlib.Path):

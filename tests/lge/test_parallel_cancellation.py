@@ -8,6 +8,8 @@ import sys
 import threading
 import time
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
@@ -90,6 +92,69 @@ def _fixture_sigterm():
     raise AssertionError("synthetic discovery completed before SIGTERM")
 
 
+def _fixture_startup_signal(signum, sigint_policy='default'):
+    """Deliver through a preexisting unblocked thread before pool ownership."""
+    context = multiprocessing.get_context('spawn')
+    pool_ready = threading.Event()
+    signal_sent = threading.Event()
+    owned_pools = []
+    constructor_returned = False
+    handler_states = []
+    if sigint_policy == 'custom':
+        def prior_sigint_handler(signum, frame):
+            handler_states.append(constructor_returned)
+        signal.signal(signal.SIGINT, prior_sigint_handler)
+    elif sigint_policy == 'ignore':
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+
+    def interrupt_constructor():
+        if not pool_ready.wait(10):
+            return
+        # raise_signal targets this unblocked thread, while Python dispatches
+        # the installed handler on the main thread inside the constructor.
+        signal.raise_signal(signum)
+        signal_sent.set()
+
+    reporter = threading.Thread(target=interrupt_constructor, daemon=True)
+    reporter.start()
+
+    def construct_pool(*args, **kwargs):
+        nonlocal constructor_returned
+        pool = context.Pool(*args, **kwargs)
+        owned_pools.append(pool)
+        pool_ready.set()
+        if not signal_sent.wait(10):
+            raise AssertionError('startup signal was not delivered')
+        constructor_returned = True
+        return pool
+
+    generator = pool_results(
+        [[('f', 40)]], _array(),
+        Config(terminal_gap_policy='observed-only', ncores=2), 2,
+    )
+    try:
+        with patch('primalscheme3.core.parallel_discovery.multiprocessing.get_context',
+                   return_value=SimpleNamespace(Pool=construct_pool)):
+            try:
+                next(generator)
+            except KeyboardInterrupt:
+                print('INTERRUPTED', flush=True)
+            finally:
+                generator.close()
+        print(f'CONSTRUCTOR_RETURNED:{constructor_returned}', flush=True)
+        print(f'PRIOR_HANDLER_STATES:{handler_states}', flush=True)
+        print(f'ACTIVE_AFTER:{_active_pids()}', flush=True)
+        print('HANDLERS_RESTORED:' + str(all(signal.getsignal(sig) == handler
+                                           for sig, handler in previous.items())), flush=True)
+    finally:
+        # A failing regression must not leave its test-owned pools behind.
+        for pool in owned_pools:
+            pool.terminate()
+            pool.join()
+        reporter.join(timeout=10)
+
+
 class ParallelCancellationTests(unittest.TestCase):
     @staticmethod
     def _fixture_environment():
@@ -117,6 +182,29 @@ class ParallelCancellationTests(unittest.TestCase):
     def test_worker_exception_closes_and_joins_workers(self):
         result = self._run_fixture("worker")
         self.assertIn("WORKER_ERROR:Invalid discovery task direction", result.stdout)
+
+    def test_startup_sigterm_waits_for_pool_ownership_before_cleanup(self):
+        result = self._run_fixture('startup_sigterm')
+        self.assertIn('INTERRUPTED', result.stdout)
+        self.assertIn('CONSTRUCTOR_RETURNED:True', result.stdout)
+        self.assertIn('HANDLERS_RESTORED:True', result.stdout)
+
+    def test_startup_sigint_waits_for_pool_ownership_before_cleanup(self):
+        result = self._run_fixture('startup_sigint')
+        self.assertIn('INTERRUPTED', result.stdout)
+        self.assertIn('CONSTRUCTOR_RETURNED:True', result.stdout)
+        self.assertIn('HANDLERS_RESTORED:True', result.stdout)
+
+    def test_custom_sigint_handler_runs_after_ownership_and_is_restored(self):
+        result = self._run_fixture('startup_custom_sigint')
+        self.assertIn('PRIOR_HANDLER_STATES:[True]', result.stdout)
+        self.assertIn('HANDLERS_RESTORED:True', result.stdout)
+
+    def test_ignored_sigint_remains_ignored_and_is_restored(self):
+        result = self._run_fixture('startup_ignored_sigint')
+        self.assertNotIn('INTERRUPTED', result.stdout)
+        self.assertIn('CONSTRUCTOR_RETURNED:True', result.stdout)
+        self.assertIn('HANDLERS_RESTORED:True', result.stdout)
 
     def test_parent_sigterm_terminates_and_joins_workers(self):
         process = subprocess.Popen(
@@ -156,6 +244,10 @@ if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "fixture":
         {"consumer": _fixture_consumer_exception,
          "worker": _fixture_worker_exception,
-         "sigterm": _fixture_sigterm}[sys.argv[2]]()
+         "sigterm": _fixture_sigterm,
+         "startup_sigterm": lambda: _fixture_startup_signal(signal.SIGTERM),
+         "startup_sigint": lambda: _fixture_startup_signal(signal.SIGINT),
+         "startup_custom_sigint": lambda: _fixture_startup_signal(signal.SIGINT, 'custom'),
+         "startup_ignored_sigint": lambda: _fixture_startup_signal(signal.SIGINT, 'ignore')}[sys.argv[2]]()
     else:
         unittest.main()

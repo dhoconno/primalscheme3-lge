@@ -8,7 +8,7 @@ from click import UsageError
 from primalscheme3.core.bedfiles import (
     read_bedlines_to_bedprimerpairs,
 )
-from primalscheme3.core.config import Config
+from primalscheme3.core.config import AmpliconSizeMetric, Config
 from primalscheme3.core.create_report_data import (
     generate_all_plotdata,
 )
@@ -42,6 +42,9 @@ def replace(
     """
     List all replacements primers
     """
+    if config.amplicon_size_metric == AmpliconSizeMetric.REFERENCE_SPAN:
+        raise UsageError("reference-span amplicon bounds support fresh design only; replacing imported primer pairs is not supported")
+
     offline_plots = False
 
     # See if the output dir already exists.

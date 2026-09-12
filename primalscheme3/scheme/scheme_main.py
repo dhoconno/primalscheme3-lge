@@ -10,7 +10,7 @@ from click import UsageError
 from primalscheme3.core.bedfiles import (
     read_in_extra_primers,
 )
-from primalscheme3.core.config import Config, MappingType
+from primalscheme3.core.config import AmpliconSizeMetric, Config, MappingType
 from primalscheme3.core.create_report_data import (
     generate_all_plotdata,
 )
@@ -55,6 +55,11 @@ def schemecreate(
     Raises:
         SystemExit: If the output directory already exists and the force flag is not set.
     """
+    if config.amplicon_size_metric == AmpliconSizeMetric.REFERENCE_SPAN and (
+        config.circular or input_bedfile is not None or config.input_bedfile is not None
+    ):
+        raise UsageError("reference-span amplicon bounds require fresh linear design without imported primer pairs")
+
     ARG_MSA = msa
     OUTPUT_DIR = pathlib.Path(output_dir).absolute()  # Keep absolute path
 
@@ -167,6 +172,7 @@ def schemecreate(
         msa_obj.generate_primerpairs(
             amplicon_size_max=config.amplicon_size_max,
             amplicon_size_min=config.amplicon_size_min,
+            amplicon_size_metric=config.amplicon_size_metric,
             dimerscore=config.dimer_score,
         )
         logger.info(

@@ -9,7 +9,7 @@ import numpy as np
 from primalschemers import FKmer, RKmer, do_pool_interact  # type: ignore
 
 from primalscheme3.core.classes import PrimerPair
-from primalscheme3.core.config import ALL_BASES, AMB_BASES, Config
+from primalscheme3.core.config import ALL_BASES, AMB_BASES, AmpliconSizeMetric, Config
 from primalscheme3.core.errors import (
     ERROR_SET,
     ContainsInvalidBase,
@@ -128,6 +128,7 @@ def generate_valid_primerpairs(
     msa_index: int,
     progress_manager: ProgressManager,
     chrom: str = "",
+    amplicon_size_metric: AmpliconSizeMetric = AmpliconSizeMetric.LEGACY_PAIRING,
 ) -> list[PrimerPair]:
     """Generates valid primer pairs for a given set of forward and reverse kmers.
 
@@ -143,6 +144,13 @@ def generate_valid_primerpairs(
     """
     ## Generate all primerpairs without checking
     checked_pp = []
+    metric = AmpliconSizeMetric(amplicon_size_metric)
+    # Reverse starts remain sorted; reverse outer ends need not be sorted when
+    # alternative oligos differ in length. Widen first, then check the BED span.
+    reverse_extension = (
+        max((rkmer.region()[1] - rkmer.start for rkmer in rkmers), default=0)
+        if metric == AmpliconSizeMetric.REFERENCE_SPAN else 0
+    )
     pt = progress_manager.create_sub_progress(
         iter=fkmers, process="Generating primer pairs", chrom=chrom
     )
@@ -151,10 +159,14 @@ def generate_valid_primerpairs(
         # Get all rkmers that would make a valid amplicon
         pos_rkmer = get_r_window_FAST2(
             kmers=rkmers,
-            start=fkmer_start + amplicon_size_min,
+            start=fkmer_start + amplicon_size_min - reverse_extension,
             end=fkmer_start + amplicon_size_max,
         )
         for rkmer in pos_rkmer:
+            if metric == AmpliconSizeMetric.REFERENCE_SPAN:
+                span = rkmer.region()[1] - fkmer_start
+                if not amplicon_size_min <= span <= amplicon_size_max:
+                    continue
             # Check for interactions
             if not do_pool_interact(fkmer.seqs_bytes(), rkmer.seqs_bytes(), dimerscore):
                 checked_pp.append(PrimerPair(fkmer, rkmer, msa_index))

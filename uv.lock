@@ -908,7 +908,7 @@ wheels = [
 
 [[package]]
 name = "primalscheme3"
-version = "3.3.0+lge.1"
+version = "3.3.0+lge.2"
 source = { editable = "." }
 dependencies = [
     { name = "dnaio" },

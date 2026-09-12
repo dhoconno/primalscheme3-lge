@@ -12,7 +12,7 @@ from primalschemers import (
 )
 
 from primalscheme3.core.classes import PrimerPair
-from primalscheme3.core.config import IUPAC_ALL_ALLOWED_DNA, Config, MappingType, TerminalGapPolicy
+from primalscheme3.core.config import IUPAC_ALL_ALLOWED_DNA, AmpliconSizeMetric, Config, MappingType, TerminalGapPolicy
 from primalscheme3.core.digestion import generate_valid_primerpairs
 from primalscheme3.core.downsample import downsample_kmer
 from primalscheme3.core.errors import (
@@ -402,7 +402,8 @@ class MSA:
             self._chrom_name = new_chromname
 
     def generate_primerpairs(
-        self, amplicon_size_min: int, amplicon_size_max: int, dimerscore: float
+        self, amplicon_size_min: int, amplicon_size_max: int, dimerscore: float,
+        amplicon_size_metric: AmpliconSizeMetric = AmpliconSizeMetric.LEGACY_PAIRING,
     ) -> None:
         self.primerpairs = generate_valid_primerpairs(
             fkmers=self.fkmers,
@@ -413,6 +414,7 @@ class MSA:
             msa_index=self.msa_index,
             progress_manager=self.progress_manager,
             chrom=self.name,
+            amplicon_size_metric=amplicon_size_metric,
         )
         # Update primerpairs to include the chrom_name and amplicon_prefix
         for primerpair in self.primerpairs:

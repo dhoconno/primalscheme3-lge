@@ -12,7 +12,7 @@ from click import UsageError
 
 # version import
 from primalscheme3.core.bedfiles import read_in_extra_primers
-from primalscheme3.core.config import Config, MappingType
+from primalscheme3.core.config import AmpliconSizeMetric, Config, MappingType
 from primalscheme3.core.create_report_data import generate_all_plotdata
 from primalscheme3.core.create_reports import generate_all_plots_html
 from primalscheme3.core.logger import setup_rich_logger
@@ -72,6 +72,12 @@ def panelcreate(
     max_amplicons_region_group: int | None = None,
     offline_plots: bool = True,
 ):
+    if config.amplicon_size_metric == AmpliconSizeMetric.REFERENCE_SPAN and (
+        mode == PanelRunModes.REGION_ONLY or region_bedfile is not None
+        or input_bedfile is not None or config.input_bedfile is not None
+    ):
+        raise UsageError("reference-span amplicon bounds require a whole-MSA equal or entropy panel without imported primer pairs or regions")
+
     ARG_MSA = msa
     OUTPUT_DIR = pathlib.Path(output_dir).absolute()
 
@@ -291,7 +297,8 @@ def panelcreate(
         # Generate all primerpairs
         msa_obj.generate_primerpairs(
             amplicon_size_max=config.amplicon_size_max,
-            amplicon_size_min=config.amplicon_size_max,
+            amplicon_size_min=config.amplicon_size_min,
+            amplicon_size_metric=config.amplicon_size_metric,
             dimerscore=config.dimer_score,
         )
         logger.info(

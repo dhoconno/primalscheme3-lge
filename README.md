@@ -2,7 +2,9 @@
 
 **This is a separately maintained LGE custom fork, not an upstream PrimalScheme3 release.** It is based on [artic-network/primalscheme3](https://github.com/artic-network/primalscheme3) v3.3.0 and retains upstream authorship and GPL-3.0 licensing.
 
-The custom distribution version is **3.3.0+lge.1**. Its executable remains `primalscheme3`, but `--version` identifies **PrimalScheme3-LGE**. Obtain the custom wheel and source from [GitHub releases](https://github.com/dhoconno/primalscheme3-lge/releases); installing the ordinary PyPI `primalscheme3` package does not select this fork.
+The custom distribution version is **3.3.0+lge.2**. Its executable remains `primalscheme3`, but `--version` identifies **PrimalScheme3-LGE**. Obtain published custom wheels and source from [GitHub releases](https://github.com/dhoconno/primalscheme3-lge/releases); installing the ordinary PyPI `primalscheme3` package does not select this fork.
+
+Creation commands accept explicit `--amplicon-size-min` and `--amplicon-size-max` bounds on the full reference-coordinate BED span, including both primers. For example, target `200`, minimum `150`, and maximum `250` permit reported spans from 150 through 250 bases. See [the size contract and supported workflows](docs/lge-fork.md#explicit-amplicon-size-bounds).
 
 The fork adds an explicit `--terminal-gap-policy` to `scheme-create` and `panel-create`:
 
