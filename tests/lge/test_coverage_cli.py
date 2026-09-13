@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 
 from primalscheme3.cli import app
 from primalscheme3.core.config import Config
+from primalscheme3.panel.coverage_validation import ConstraintProfile
 from primalscheme3.panel.panel_classes import PanelRunModes
 from primalscheme3.panel.panel_main import panelcreate
 
@@ -440,6 +441,75 @@ def test_legacy_scientific_config_coercion_and_positive_product_size_remain_comp
     config = Config(n_pools=1.7, mismatch_product_size=True)
     assert config.n_pools == 1
     assert config.mismatch_product_size == 1
+
+
+def test_coverage_rejects_boolean_homopolymer_limit_before_coercion():
+    with pytest.raises(ValueError, match="primer_homopolymer_max.*integer"):
+        Config(
+            selection_algorithm="coverage",
+            amplicon_size=200,
+            amplicon_size_min=150,
+            amplicon_size_max=280,
+            amplicon_size_metric="reference-span",
+            mismatch_product_size=2000,
+            primer_homopolymer_max=True,
+        )
+
+
+def test_coverage_rejects_fractional_primer_walk_before_coercion():
+    with pytest.raises(ValueError, match="primer_max_walk.*integer"):
+        Config(
+            selection_algorithm="coverage",
+            amplicon_size=200,
+            amplicon_size_min=150,
+            amplicon_size_max=280,
+            amplicon_size_metric="reference-span",
+            mismatch_product_size=2000,
+            primer_max_walk=1.7,
+        )
+
+
+def test_coverage_rejects_unsupported_edit_distance_at_config_boundary():
+    with pytest.raises(ValueError, match="single-mismatch"):
+        Config(
+            selection_algorithm="coverage",
+            amplicon_size=200,
+            amplicon_size_min=150,
+            amplicon_size_max=280,
+            amplicon_size_metric="reference-span",
+            mismatch_product_size=2000,
+            editdist_max=2,
+        )
+
+
+def test_coverage_preserves_fractional_hairpin_threshold_without_changing_legacy():
+    config = Config(
+        selection_algorithm="coverage",
+        amplicon_size=200,
+        amplicon_size_min=150,
+        amplicon_size_max=280,
+        amplicon_size_metric="reference-span",
+        mismatch_product_size=2000,
+        primer_hairpin_th_max=51.9,
+    )
+    assert config.primer_hairpin_th_max == 51.9
+    assert type(config.primer_hairpin_th_max) is float
+    assert (
+        ConstraintProfile.from_config(config).to_dict()["thermochemistry"][
+            "primer_hairpin_th_max"
+        ]
+        == 51.9
+    )
+    legacy = Config(
+        primer_hairpin_th_max=51.9,
+        primer_homopolymer_max=True,
+        primer_max_walk=1.7,
+        editdist_max=2,
+    )
+    assert legacy.primer_hairpin_th_max == 51
+    assert legacy.primer_homopolymer_max == 1
+    assert legacy.primer_max_walk == 1
+    assert legacy.editdist_max == 2
 
 
 @pytest.mark.parametrize("flag", ["--dimer-score", "--min-base-freq"])

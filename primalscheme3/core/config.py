@@ -1,5 +1,6 @@
 import math
 import pathlib
+from dataclasses import dataclass
 from enum import Enum
 from importlib.metadata import version
 from typing import Any
@@ -30,6 +31,84 @@ class AmpliconSizeMetric(str, Enum):
 
 
 PRIMER_COUNT_ATTR_STRING = "pc"
+
+
+@dataclass(frozen=True)
+class _CoverageNumericOption:
+    expected_type: type[int] | type[float]
+    coverage_only: bool
+    constraint: str = "finite"
+
+
+# Caller-set numeric values consumed by coverage discovery, its immutable
+# scientific profile, or the selector. Derived primer size/GC bounds are
+# validated by ConstraintProfile after Config resolves the high-GC preset.
+_COVERAGE_NUMERIC_OPTIONS = {
+    "coverage_target": _CoverageNumericOption(float, False, "unit_interval"),
+    "optimizer_seed": _CoverageNumericOption(int, False),
+    "optimizer_starts": _CoverageNumericOption(int, False, "positive"),
+    "optimizer_repair_rounds": _CoverageNumericOption(int, False, "nonnegative"),
+    "optimizer_time_limit": _CoverageNumericOption(float, False, "positive"),
+    "ncores": _CoverageNumericOption(int, True, "positive"),
+    "n_pools": _CoverageNumericOption(int, True, "positive"),
+    "min_overlap": _CoverageNumericOption(int, True, "nonnegative"),
+    "min_base_freq": _CoverageNumericOption(float, True, "unit_interval"),
+    "amplicon_size": _CoverageNumericOption(int, True, "positive"),
+    "amplicon_size_min": _CoverageNumericOption(int, True, "positive"),
+    "amplicon_size_max": _CoverageNumericOption(int, True, "positive"),
+    "primer_tm_min": _CoverageNumericOption(float, True),
+    "primer_tm_max": _CoverageNumericOption(float, True),
+    "primer_annealing_tempc": _CoverageNumericOption(int, True),
+    "primer_hairpin_th_max": _CoverageNumericOption(float, True),
+    "primer_homopolymer_max": _CoverageNumericOption(int, True),
+    "primer_max_walk": _CoverageNumericOption(int, True),
+    "editdist_max": _CoverageNumericOption(int, True, "single_mismatch"),
+    "mismatch_product_size": _CoverageNumericOption(int, True, "positive"),
+    "mv_conc": _CoverageNumericOption(float, True),
+    "dv_conc": _CoverageNumericOption(float, True),
+    "dntp_conc": _CoverageNumericOption(float, True),
+    "dna_conc": _CoverageNumericOption(float, True),
+    "dimer_score": _CoverageNumericOption(float, True),
+}
+
+
+def _validate_raw_coverage_numerics(
+    kwargs: dict[str, Any], *, coverage_requested: bool
+) -> None:
+    for field, option in _COVERAGE_NUMERIC_OPTIONS.items():
+        if option.coverage_only and not coverage_requested:
+            continue
+        value = kwargs.get(field)
+        if value is None:
+            continue
+        if option.expected_type is int:
+            if type(value) is not int:
+                raise ValueError(f"{field} must be an integer")
+        elif type(value) not in {int, float}:
+            raise ValueError(f"{field} must be numeric")
+
+
+def _validate_effective_coverage_numerics(config: "Config") -> None:
+    for field, option in _COVERAGE_NUMERIC_OPTIONS.items():
+        if option.coverage_only and config.selection_algorithm != "coverage":
+            continue
+        value = getattr(config, field)
+        if option.expected_type is int:
+            if type(value) is not int:
+                raise ValueError(f"{field} must be an integer")
+        elif type(value) is not float or not math.isfinite(value):
+            raise ValueError(f"{field} must be finite")
+
+        if option.constraint == "positive" and value <= 0:
+            raise ValueError(f"{field} must be positive")
+        if option.constraint == "nonnegative" and value < 0:
+            raise ValueError(f"{field} must be nonnegative")
+        if option.constraint == "unit_interval" and not 0 <= value <= 1:
+            raise ValueError(f"{field} must be between zero and one")
+        if option.constraint == "single_mismatch" and value != 1:
+            raise ValueError(
+                "coverage supports the existing single-mismatch policy only"
+            )
 
 
 class Config:
@@ -126,68 +205,20 @@ class Config:
 
     def __init__(self, **kwargs: Any) -> None:
         self.discovery_workers_by_msa = {}
-        for field in (
-            "optimizer_seed",
-            "optimizer_starts",
-            "optimizer_repair_rounds",
-        ):
-            if field in kwargs and type(kwargs[field]) is not int:
-                raise ValueError(f"{field} must be an integer")
-        for field in ("coverage_target", "optimizer_time_limit"):
-            if type(kwargs.get(field)) is bool:
-                raise ValueError(f"{field} must be numeric, not boolean")
         coverage_requested = kwargs.get("selection_algorithm", "legacy") == "coverage"
+        _validate_raw_coverage_numerics(kwargs, coverage_requested=coverage_requested)
         if coverage_requested:
-            for field in (
-                "amplicon_size",
-                "amplicon_size_min",
-                "amplicon_size_max",
-                "n_pools",
-                "ncores",
-                "min_overlap",
-                "mismatch_product_size",
-                "editdist_max",
-            ):
-                value = kwargs.get(field)
-                if value is not None and type(value) is not int:
-                    raise ValueError(f"coverage {field} must be an integer")
-            for field in (
-                "min_base_freq",
-                "dimer_score",
-                "primer_tm_min",
-                "primer_tm_max",
-                "primer_hairpin_th_max",
-                "mv_conc",
-                "dv_conc",
-                "dntp_conc",
-                "dna_conc",
-            ):
-                if type(kwargs.get(field)) is bool:
-                    raise ValueError(f"coverage {field} must be numeric, not boolean")
+            # assign_kwargs historically infers conversion from the runtime
+            # default. Normalize coverage real defaults so an integer-valued
+            # default cannot truncate a valid fractional scientific threshold.
+            for field, option in _COVERAGE_NUMERIC_OPTIONS.items():
+                if option.expected_type is float:
+                    setattr(self, field, float(getattr(self, field)))
         self.assign_kwargs(**kwargs)
         if self.selection_algorithm not in {"legacy", "coverage"}:
             raise ValueError("selection_algorithm must be legacy or coverage")
         if self.coverage_metric not in {"full-span", "primer-trimmed"}:
             raise ValueError("coverage_metric must be full-span or primer-trimmed")
-        if (
-            not math.isfinite(self.coverage_target)
-            or not 0 <= self.coverage_target <= 1
-        ):
-            raise ValueError("coverage_target must be finite and between zero and one")
-        if (
-            not math.isfinite(self.optimizer_time_limit)
-            or self.optimizer_time_limit <= 0
-        ):
-            raise ValueError("optimizer_time_limit must be positive and finite")
-        if type(self.optimizer_seed) is not int:
-            raise ValueError("optimizer_seed must be an integer")
-        if type(self.optimizer_starts) is not int or self.optimizer_starts <= 0:
-            raise ValueError("optimizer_starts must be a positive integer")
-        if (
-            type(self.optimizer_repair_rounds) is not int
-            or self.optimizer_repair_rounds < 0
-        ):
-            raise ValueError("optimizer_repair_rounds must be a nonnegative integer")
         if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY and (
             self.downsample or self.use_annealing
         ):
@@ -221,35 +252,8 @@ class Config:
                 raise ValueError(
                     "reference-span amplicon bounds require fresh linear design without imported primer pairs"
                 )
+        _validate_effective_coverage_numerics(self)
         if self.selection_algorithm == "coverage":
-            for field in (
-                "amplicon_size",
-                "amplicon_size_min",
-                "amplicon_size_max",
-                "n_pools",
-                "ncores",
-                "mismatch_product_size",
-            ):
-                value = getattr(self, field)
-                if type(value) is not int or value <= 0:
-                    raise ValueError(f"coverage {field} must be a positive integer")
-            if type(self.min_overlap) is not int or self.min_overlap < 0:
-                raise ValueError("coverage min_overlap must be a nonnegative integer")
-            for field in (
-                "min_base_freq",
-                "dimer_score",
-                "primer_tm_min",
-                "primer_tm_max",
-                "primer_hairpin_th_max",
-                "mv_conc",
-                "dv_conc",
-                "dntp_conc",
-                "dna_conc",
-            ):
-                if not math.isfinite(getattr(self, field)):
-                    raise ValueError(f"coverage {field} must be finite")
-            if not 0 <= self.min_base_freq <= 1:
-                raise ValueError("coverage min_base_freq must be between zero and one")
             if self.amplicon_size_metric != AmpliconSizeMetric.REFERENCE_SPAN:
                 raise ValueError(
                     "coverage selection requires explicit reference-span amplicon bounds"
