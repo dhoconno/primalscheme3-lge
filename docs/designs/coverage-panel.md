@@ -39,7 +39,7 @@ New `panel-v1` compatibility rules are separate from legacy MatchDB and Multiple
 
 ## Search
 
-Reuse the full frozen candidate set. Start with deterministic legacy-like and scarcity/deficit-aware constructions under the *new* compatibility rules; also consider the actual legacy solution only if independently valid under those rules. Do not promise no regression relative to an invalid legacy solution.
+Reuse the full frozen candidate set. Start with deterministic legacy-like and scarcity/deficit-aware constructions under the *new* compatibility rules. The search API can also consider a supplied fixed baseline assignment vector, including a historical legacy solution, only if independently valid under those rules. Native default execution does not rerun the unseeded, identity-hash-ordered legacy selector; label its deterministic baseline construction accurately. Do not promise no regression relative to an invalid or unsupplied legacy solution.
 
 Use seeded starts with canonical semantic tie-breaks. Across target frontiers, prioritize uncovered target deficit and candidates with fewer alternatives; choose among feasible pools by balanced unique-oligo burden and remaining compatibility. Evaluate the objective lexicographically: minimize worst normalized target shortfall; minimize summed shortfall; maximize mean normalized unique coverage; minimize unique-oligo burden, amplicon count, pool imbalance and distance from requested target length. Canonical solution signature resolves final ties.
 
