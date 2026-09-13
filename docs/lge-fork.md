@@ -4,11 +4,23 @@
 
 Public repository: https://github.com/dhoconno/primalscheme3-lge
 
-Custom source version: `3.3.0+lge.2`; release tag when published: `v3.3.0-lge.2`.
+Custom source version: `3.3.0+lge.3`. This coverage-selector revision is currently a local, unpublished build.
 
 Upstream baseline: PrimalScheme3 v3.3.0, commit `dd13ec5cb1cf375f052640355c73101c0c4bf839`. Upstream retains its authorship and copyrights. The fork remains GPL-3.0 licensed. It is not an upstream release or endorsement.
 
-The distribution/import/executable name remains `primalscheme3` for compatibility. An installed wheel from this version emits `PrimalScheme3-LGE version: 3.3.0+lge.2`. The release wheel contains `lge-build.json` identifying the exact fork and upstream commits and build tooling.
+The distribution/import/executable name remains `primalscheme3` for compatibility. This version emits `PrimalScheme3-LGE version: 3.3.0+lge.3` and `--capabilities-json` reports the exact editable source, runtime dependencies, and loaded scientific extension binaries.
+
+## Coverage panel selection
+
+`panel-create --selection-algorithm coverage` enables the bounded multistart coverage selector. It supports fresh, linear, whole-MSA `--mode equal` panels with first-reference mapping and explicit `--amplicon-size-min`/`--amplicon-size-max` bounds. Both `legacy` and `observed-only` discovery backends are supported. Region, imported-pair, circular, consensus, annealing and downsampling modes are rejected before output creation. Supplied-MSA specificity remains required through `--use-matchdb`; coverage applies the separate row-aware `panel-v1` profile and does not use the legacy MatchDB selector verdicts.
+
+The selector options are `--coverage-metric full-span|primer-trimmed` (default `full-span`), `--coverage-target` (default `0.90`), `--optimizer-seed` (default `0`), `--optimizer-starts` (default `4`), `--optimizer-repair-rounds` (default `2`), and `--optimizer-time-limit` (default `120` seconds). The wall limit covers search and can truncate construction or repair; it does not include candidate discovery or fresh final validation. Metadata records completed work and the stop reason. The empty assignment remains a valid feasible result.
+
+`--mispriming-product-size` is part of the new coverage CLI and resolves to `2000`; coverage requires a positive value. Legacy CLI use retains historical zero. An explicit zero is equivalent to that legacy default, while a nonzero value is rejected unless coverage is selected. Existing programmatic legacy `Config.mismatch_product_size` behavior remains available.
+
+The reference-span bounds constrain the first-reference BED envelope, from the earliest forward oligo start through the latest reverse oligo end. Row-specific product spans can differ because of indels and remain support/specificity diagnostics rather than additional sizing constraints.
+
+Successful coverage output adds `candidate-catalog.json.gz`, `panel-validation.json`, `panel-optimizer.json`, and `panel-provenance.json`. Native BED, amplicon BED, reference FASTA, HTML, plot-data and PNG outputs retain their existing formats. `config.json.panel_optimizer` links the versioned records, resolved selector options and profile. Paths consumed inside the native result are relative; provenance separately retains absolute historical argv/input origins, exact durable input-copy and output byte hashes/sizes, source/build/runtime identity, wall/status/stderr, and excludes only its own file to avoid a self-hash cycle. Invalid independent validation fails closed and cannot publish a successful result.
 
 ## Selectable discovery behavior
 
@@ -54,4 +66,4 @@ Before the lge.2 size changes, nineteen local native runs on authentic human and
 
 For the human A fixture, one worker took 5.57 seconds and four took 5.10 seconds in a single local Apple Silicon comparison. The 22 BED records had identical scientific fields and order; generated identifiers differed. These are individual measurements, not a general speedup claim. The six-locus panels completed in approximately 39 seconds for human and 31 seconds for macaque with four workers.
 
-LGE preserves full scientific input/output provenance in its native result bundles. Local validation datasets, user paths, credentials and agent work records are not included in this public source repository.
+LGE preserves full scientific input/output provenance in its native result bundles. Coverage native output now carries the same reproducibility evidence before LGE imports it. Local validation datasets, user paths, credentials and agent work records are not included in this public source repository.

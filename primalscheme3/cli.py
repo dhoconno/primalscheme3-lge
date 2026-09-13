@@ -2,13 +2,19 @@
 import argparse
 import json
 import pathlib
+import sys
 from importlib.metadata import version
 from typing import Annotated
 
 import typer
 
 # Module imports
-from primalscheme3.core.config import AmpliconSizeMetric, Config, MappingType, TerminalGapPolicy
+from primalscheme3.core.config import (
+    AmpliconSizeMetric,
+    Config,
+    MappingType,
+    TerminalGapPolicy,
+)
 from primalscheme3.core.downsample import downsample_scheme
 from primalscheme3.core.msa import parse_msa
 from primalscheme3.core.primer_visual import bedfile_plot_html, primer_mismatch_heatmap
@@ -16,6 +22,7 @@ from primalscheme3.core.progress_tracker import ProgressManager
 from primalscheme3.interaction.interaction import (
     visualise_interactions,
 )
+from primalscheme3.panel.coverage_provenance import capabilities_document
 from primalscheme3.panel.panel_main import PanelRunModes, panelcreate
 from primalscheme3.repair.repair import repair
 from primalscheme3.replace.replace import ReplaceRunModes, replace
@@ -60,14 +67,24 @@ def create_config_with_amplicon_bounds(params: dict) -> Config:
     """Only explicit creation flags opt in; old saved bounds retain their metric."""
     metric = (
         AmpliconSizeMetric.REFERENCE_SPAN
-        if any(params.get(key) is not None for key in ("amplicon_size_min", "amplicon_size_max"))
+        if any(
+            params.get(key) is not None
+            for key in ("amplicon_size_min", "amplicon_size_max")
+        )
         else AmpliconSizeMetric.LEGACY_PAIRING
     )
     if metric == AmpliconSizeMetric.REFERENCE_SPAN:
         if params.get("bedfile") is not None:
-            raise typer.BadParameter("reference-span amplicon bounds do not support imported primer pairs (--bedfile)")
-        if params.get("region_bedfile") is not None or params.get("mode") == PanelRunModes.REGION_ONLY:
-            raise typer.BadParameter("reference-span amplicon bounds require a whole-MSA equal or entropy panel without regions")
+            raise typer.BadParameter(
+                "reference-span amplicon bounds do not support imported primer pairs (--bedfile)"
+            )
+        if (
+            params.get("region_bedfile") is not None
+            or params.get("mode") == PanelRunModes.REGION_ONLY
+        ):
+            raise typer.BadParameter(
+                "reference-span amplicon bounds require a whole-MSA equal or entropy panel without regions"
+            )
     try:
         return Config(**params, amplicon_size_metric=metric)
     except ValueError as error:
@@ -83,10 +100,25 @@ def typer_callback_version(value: bool):
         raise typer.Exit()
 
 
+def typer_callback_capabilities(value: bool):
+    if value:
+        typer.echo(
+            json.dumps(capabilities_document(), sort_keys=True, separators=(",", ":"))
+        )
+        raise typer.Exit()
+
+
 @app.callback()
 def primalscheme3(
     value: Annotated[bool, typer.Option] = typer.Option(
         False, "--version", callback=typer_callback_version
+    ),
+    capabilities_json: Annotated[bool, typer.Option] = typer.Option(
+        False,
+        "--capabilities-json",
+        callback=typer_callback_capabilities,
+        is_eager=True,
+        help="Emit the machine-readable engine capability and runtime identity.",
     ),
 ):
     pass
@@ -120,11 +152,17 @@ def scheme_create(
     ] = Config.amplicon_size,
     amplicon_size_min: Annotated[
         int | None,
-        typer.Option(help="Inclusive minimum full reference BED span, including primers. Enables reference-span pairing.", min=1),
+        typer.Option(
+            help="Inclusive minimum full reference BED span, including primers. Enables reference-span pairing.",
+            min=1,
+        ),
     ] = None,
     amplicon_size_max: Annotated[
         int | None,
-        typer.Option(help="Inclusive maximum full reference BED span, including primers. Enables reference-span pairing.", min=1),
+        typer.Option(
+            help="Inclusive maximum full reference BED span, including primers. Enables reference-span pairing.",
+            min=1,
+        ),
     ] = None,
     bedfile: Annotated[
         pathlib.Path | None,
@@ -150,7 +188,9 @@ def scheme_create(
     ] = Config.dimer_score,
     terminal_gap_policy: Annotated[
         TerminalGapPolicy,
-        typer.Option(help="LGE custom policy: legacy uses upstream Rust; observed-only uses Python discovery, excluding terminal missing coverage without imputation. Internal gaps remain observations."),
+        typer.Option(
+            help="LGE custom policy: legacy uses upstream Rust; observed-only uses Python discovery, excluding terminal missing coverage without imputation. Internal gaps remain observations."
+        ),
     ] = TerminalGapPolicy.LEGACY,
     min_base_freq: Annotated[
         float,
@@ -387,15 +427,26 @@ def panel_create(
         ),
     ] = PanelRunModes.REGION_ONLY.value,  # type: ignore
     amplicon_size: Annotated[
-        int, typer.Option(help="Nominal amplicon size; omitted bounds resolve to ±10 percent. Does not rank by target proximity.", min=100, max=2000)
+        int,
+        typer.Option(
+            help="Nominal amplicon size; omitted bounds resolve to ±10 percent. Does not rank by target proximity.",
+            min=100,
+            max=2000,
+        ),
     ] = Config.amplicon_size,
     amplicon_size_min: Annotated[
         int | None,
-        typer.Option(help="Inclusive minimum full reference BED span, including primers. Enables reference-span pairing.", min=1),
+        typer.Option(
+            help="Inclusive minimum full reference BED span, including primers. Enables reference-span pairing.",
+            min=1,
+        ),
     ] = None,
     amplicon_size_max: Annotated[
         int | None,
-        typer.Option(help="Inclusive maximum full reference BED span, including primers. Enables reference-span pairing.", min=1),
+        typer.Option(
+            help="Inclusive maximum full reference BED span, including primers. Enables reference-span pairing.",
+            min=1,
+        ),
     ] = None,
     n_pools: Annotated[
         int, typer.Option(help="Number of pools to use", min=1)
@@ -405,7 +456,9 @@ def panel_create(
     ] = Config.dimer_score,
     terminal_gap_policy: Annotated[
         TerminalGapPolicy,
-        typer.Option(help="LGE custom policy: legacy uses upstream Rust; observed-only uses Python discovery, excluding terminal missing coverage without imputation. Internal gaps remain observations."),
+        typer.Option(
+            help="LGE custom policy: legacy uses upstream Rust; observed-only uses Python discovery, excluding terminal missing coverage without imputation. Internal gaps remain observations."
+        ),
     ] = TerminalGapPolicy.LEGACY,
     min_base_freq: Annotated[
         float,
@@ -418,10 +471,10 @@ def panel_create(
         ),
     ] = Config.mapping.value,  # type: ignore
     max_amplicons: Annotated[
-        int | None, typer.Option(help="Max number of amplicons to create", min=1)
+        int | None, typer.Option(help="Max number of amplicons to create", min=0)
     ] = None,
     max_amplicons_msa: Annotated[
-        int | None, typer.Option(help="Max number of amplicons for each MSA", min=1)
+        int | None, typer.Option(help="Max number of amplicons for each MSA", min=0)
     ] = None,
     max_amplicons_region_group: Annotated[
         int | None,
@@ -468,12 +521,79 @@ def panel_create(
             hidden=True,
         ),
     ] = Config.downsample_target,
+    selection_algorithm: Annotated[
+        str, typer.Option(help="Panel selector: legacy or coverage")
+    ] = "legacy",
+    coverage_metric: Annotated[
+        str, typer.Option(help="Coverage interval: full-span or primer-trimmed")
+    ] = "full-span",
+    coverage_target: Annotated[
+        float, typer.Option(help="Per-target coverage objective between zero and one")
+    ] = 0.90,
+    optimizer_seed: Annotated[
+        int, typer.Option(help="Deterministic coverage optimizer seed")
+    ] = 0,
+    optimizer_starts: Annotated[
+        int, typer.Option(help="Positive number of bounded optimizer starts")
+    ] = 4,
+    optimizer_repair_rounds: Annotated[
+        int, typer.Option(help="Nonnegative repair rounds per optimizer start")
+    ] = 2,
+    optimizer_time_limit: Annotated[
+        float, typer.Option(help="Positive finite selector wall-time budget in seconds")
+    ] = 120.0,
+    mispriming_product_size: Annotated[
+        int | None,
+        typer.Option(
+            help="Coverage supplied-MSA product bound; defaults to 2000 and must be positive"
+        ),
+    ] = None,
 ):
     """
     Creates a primer panel
     """
     # Update the config with CLI params
-    config = create_config_with_amplicon_bounds(locals())
+    params = locals().copy()
+    if selection_algorithm not in {"legacy", "coverage"}:
+        raise typer.BadParameter("--selection-algorithm must be legacy or coverage")
+    if selection_algorithm == "legacy":
+        defaults = {
+            "coverage_metric": "full-span",
+            "coverage_target": 0.90,
+            "optimizer_seed": 0,
+            "optimizer_starts": 4,
+            "optimizer_repair_rounds": 2,
+            "optimizer_time_limit": 120.0,
+        }
+        changed = [
+            name for name, default in defaults.items() if params[name] != default
+        ]
+        if changed:
+            raise typer.BadParameter(
+                "coverage optimizer options require --selection-algorithm coverage: "
+                + ", ".join("--" + name.replace("_", "-") for name in changed)
+            )
+        if mispriming_product_size not in {None, 0}:
+            raise typer.BadParameter(
+                "nonzero --mispriming-product-size requires --selection-algorithm coverage"
+            )
+        if max_amplicons == 0 or max_amplicons_msa == 0:
+            raise typer.BadParameter(
+                "legacy selection requires positive max-amplicons limits when supplied"
+            )
+        params["mismatch_product_size"] = 0
+    else:
+        params["mismatch_product_size"] = (
+            2000 if mispriming_product_size is None else mispriming_product_size
+        )
+        if mode != PanelRunModes.EQUAL:
+            raise typer.BadParameter("coverage selection supports only --mode equal")
+        if max_amplicons_region_group is not None:
+            raise typer.BadParameter(
+                "coverage selection does not support --max-amplicons-region-group"
+            )
+    params.pop("mispriming_product_size", None)
+    config = create_config_with_amplicon_bounds(params)
 
     # Check the output directory
     check_output_dir(output, force)
@@ -494,6 +614,7 @@ def panel_create(
         max_amplicons_region_group=max_amplicons_region_group,
         force=force,
         offline_plots=offline_plots,
+        executed_argv=list(sys.argv),
     )
 
 

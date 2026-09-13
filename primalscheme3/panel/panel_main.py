@@ -6,6 +6,7 @@ import json
 import pathlib
 import shutil
 import sys
+from time import monotonic
 
 import dnaio
 from click import UsageError
@@ -23,6 +24,7 @@ from primalscheme3.core.primer_visual import (
     primer_mismatch_heatmap,
 )
 from primalscheme3.core.progress_tracker import ProgressManager
+from primalscheme3.panel.coverage_pipeline import run_coverage_pipeline
 
 # Module imports
 from primalscheme3.panel.panel_classes import (
@@ -58,7 +60,7 @@ def read_region_bedfile(path) -> list[list[str]]:
     return bed_lines
 
 
-def panelcreate(
+def _panelcreate_impl(
     msa: list[pathlib.Path],
     output_dir: pathlib.Path,
     config: Config,
@@ -71,12 +73,43 @@ def panelcreate(
     max_amplicons_msa: int | None = None,
     max_amplicons_region_group: int | None = None,
     offline_plots: bool = True,
+    executed_argv: list[str] | None = None,
+    execution_start: dict | None = None,
+    workflow_started_at: float | None = None,
 ):
+    coverage_started_at = (
+        workflow_started_at if workflow_started_at is not None else monotonic()
+    )
+    if config.selection_algorithm == "coverage":
+        if mode != PanelRunModes.EQUAL:
+            raise UsageError("coverage selection supports only whole-MSA equal mode")
+        if region_bedfile is not None:
+            raise UsageError("coverage selection does not support region inputs")
+        if input_bedfile is not None or config.input_bedfile is not None:
+            raise UsageError(
+                "coverage selection requires a fresh design without imported primer pairs"
+            )
+        if max_amplicons_region_group is not None:
+            raise UsageError(
+                "coverage selection does not support max_amplicons_region_group"
+            )
+        for name, cap in (
+            ("max_amplicons", max_amplicons),
+            ("max_amplicons_msa", max_amplicons_msa),
+        ):
+            if cap is not None and (type(cap) is not int or cap < 0):
+                raise UsageError(
+                    f"coverage {name} must be a nonnegative integer or None"
+                )
     if config.amplicon_size_metric == AmpliconSizeMetric.REFERENCE_SPAN and (
-        mode == PanelRunModes.REGION_ONLY or region_bedfile is not None
-        or input_bedfile is not None or config.input_bedfile is not None
+        mode == PanelRunModes.REGION_ONLY
+        or region_bedfile is not None
+        or input_bedfile is not None
+        or config.input_bedfile is not None
     ):
-        raise UsageError("reference-span amplicon bounds require a whole-MSA equal or entropy panel without imported primer pairs or regions")
+        raise UsageError(
+            "reference-span amplicon bounds require a whole-MSA equal or entropy panel without imported primer pairs or regions"
+        )
 
     ARG_MSA = msa
     OUTPUT_DIR = pathlib.Path(output_dir).absolute()
@@ -116,19 +149,22 @@ def panelcreate(
     if pm is None:
         pm = ProgressManager()
 
-    # Create the mismatch db
-    logger.info(
-        "Creating the Mismatch Database",
-    )
-    mismatch_db = MatchDB(
-        OUTPUT_DIR / "work/mismatch",
-        [str(x) for x in ARG_MSA] if config.use_matchdb else [],
-        config,
-    )
-    logger.info(
-        f"[green]Created[/green]: "
-        f"{OUTPUT_DIR.relative_to(OUTPUT_DIR.parent)}/work/mismatch.db",
-    )
+    # Coverage uses its row-aware supplied-MSA checker and does not build the
+    # legacy MatchDB solely for unused selection bookkeeping.
+    mismatch_db = None
+    if config.selection_algorithm == "legacy":
+        logger.info(
+            "Creating the Mismatch Database",
+        )
+        mismatch_db = MatchDB(
+            OUTPUT_DIR / "work/mismatch",
+            [str(x) for x in ARG_MSA] if config.use_matchdb else [],
+            config,
+        )
+        logger.info(
+            f"[green]Created[/green]: "
+            f"{OUTPUT_DIR.relative_to(OUTPUT_DIR.parent)}/work/mismatch.db",
+        )
 
     regions_mapping: dict[Region, str | None] | None = None
     # Read in the region_bedfile if given
@@ -150,13 +186,32 @@ def panelcreate(
     ## Read in the MSAs
     msa_dict: dict[int, PanelMSA] = {}
     msa_data: dict = {}
+    input_records: list[dict[str, str]] = []
     for msa_index, msa_path in enumerate(ARG_MSA):
         msa_data[msa_index] = {}
+
+        local_name = (
+            f"{msa_index:04d}-{msa_path.name}"
+            if config.selection_algorithm == "coverage"
+            else msa_path.name
+        )
+        local_msa_path = OUTPUT_DIR / "work" / local_name
+        read_path = msa_path
+        if config.selection_algorithm == "coverage":
+            shutil.copyfile(msa_path, local_msa_path)
+            read_path = local_msa_path
+            input_records.append(
+                {
+                    "sourcePath": str(msa_path.absolute()),
+                    "storedPath": f"work/{local_name}",
+                    "sourceIndex": msa_index,
+                }
+            )
 
         # Read in the MSA
         msa_obj = PanelMSA(
             name=msa_path.stem,
-            path=msa_path,
+            path=read_path,
             msa_index=msa_index,
             logger=logger,
             progress_manager=pm,
@@ -164,8 +219,8 @@ def panelcreate(
         )
 
         # copy the msa into the output / work dir
-        local_msa_path = OUTPUT_DIR / "work" / msa_path.name
-        msa_obj.write_msa_to_file(local_msa_path)
+        if config.selection_algorithm == "legacy":
+            msa_obj.write_msa_to_file(local_msa_path)
 
         # Create MSA checksum
         with open(local_msa_path, "rb") as f:
@@ -183,9 +238,7 @@ def panelcreate(
 
         # Add some msa data to the dict
         msa_data[msa_index]["msa_name"] = msa_obj.name
-        msa_data[msa_index]["msa_path"] = str(
-            "work/" + msa_path.name
-        )  # Write local path
+        msa_data[msa_index]["msa_path"] = str("work/" + local_name)  # Write local path
         msa_data[msa_index]["msa_chromname"] = msa_obj._chrom_name
         msa_data[msa_index]["msa_uuid"] = msa_obj._uuid
 
@@ -321,6 +374,27 @@ def panelcreate(
 
     # Add all the msa_data to the cfg
     config_dict["msa_data"] = msa_data
+
+    if config.selection_algorithm == "coverage":
+        config_dict["region_bedfile"] = None
+        config_dict["input_bedfile"] = None
+        config_dict["discovery_core_count"] = config.discovery_core_count
+        config_dict["discovery_workers_by_msa"] = dict(config.discovery_workers_by_msa)
+        return run_coverage_pipeline(
+            msa_dict=msa_dict,
+            msa_data=msa_data,
+            input_records=input_records,
+            output_dir=OUTPUT_DIR,
+            config=config,
+            config_dict=config_dict,
+            max_amplicons=max_amplicons,
+            max_amplicons_msa=max_amplicons_msa,
+            offline_plots=offline_plots,
+            logger=logger,
+            argv=executed_argv or list(sys.argv),
+            started_at=coverage_started_at,
+            execution_start=execution_start,
+        )
 
     ## Digestion finished, now create the panel
 
@@ -540,3 +614,86 @@ def panelcreate(
                 )
 
     logger.info("Completed Successfully")
+
+
+def panelcreate(
+    msa: list[pathlib.Path],
+    output_dir: pathlib.Path,
+    config: Config,
+    pm: ProgressManager | None,
+    force: bool = False,
+    input_bedfile: pathlib.Path | None = None,
+    region_bedfile: pathlib.Path | None = None,
+    mode: PanelRunModes = PanelRunModes.ENTROPY,
+    max_amplicons: int | None = None,
+    max_amplicons_msa: int | None = None,
+    max_amplicons_region_group: int | None = None,
+    offline_plots: bool = True,
+    executed_argv: list[str] | None = None,
+):
+    """Public panel entry point with durable failure evidence for coverage runs."""
+
+    started_at = monotonic()
+    execution_start = None
+    if config.selection_algorithm == "coverage":
+        from primalscheme3.panel.coverage_provenance import capture_execution_identity
+
+        execution_start = capture_execution_identity(msa)
+    try:
+        return _panelcreate_impl(
+            msa=msa,
+            output_dir=output_dir,
+            config=config,
+            pm=pm,
+            force=force,
+            input_bedfile=input_bedfile,
+            region_bedfile=region_bedfile,
+            mode=mode,
+            max_amplicons=max_amplicons,
+            max_amplicons_msa=max_amplicons_msa,
+            max_amplicons_region_group=max_amplicons_region_group,
+            offline_plots=offline_plots,
+            executed_argv=executed_argv,
+            execution_start=execution_start,
+            workflow_started_at=started_at,
+        )
+    except Exception as error:
+        output = pathlib.Path(output_dir).absolute()
+        provenance = output / "panel-provenance.json"
+        if (
+            config.selection_algorithm == "coverage"
+            and output.is_dir()
+            and not provenance.exists()
+        ):
+            from primalscheme3.panel.coverage_provenance import finalize_provenance
+
+            inputs = [
+                {
+                    "sourcePath": str(path.absolute()),
+                    "storedPath": f"work/{index:04d}-{path.name}",
+                }
+                for index, path in enumerate(msa)
+            ]
+            resolved = config.to_dict()
+            resolved.update(
+                {
+                    "mode": mode.value,
+                    "max_amplicons": max_amplicons,
+                    "max_amplicons_msa": max_amplicons_msa,
+                    "max_amplicons_region_group": max_amplicons_region_group,
+                }
+            )
+            finalize_provenance(
+                output_dir=output,
+                argv=executed_argv or list(sys.argv),
+                resolved_options=resolved,
+                inputs=inputs,
+                started_at=started_at,
+                ended_at=monotonic(),
+                status="failure",
+                exit_status=1,
+                stderr=str(error),
+                scientific={"selectionAlgorithm": "coverage"},
+                execution_start=execution_start,
+            )
+        raise

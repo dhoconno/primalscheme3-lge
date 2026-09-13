@@ -1,3 +1,4 @@
+import math
 import pathlib
 from enum import Enum
 from importlib.metadata import version
@@ -42,11 +43,19 @@ class Config:
 
     @property
     def discovery_backend(self) -> str:
-        return "python-observed-only" if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY else "rust-legacy"
+        return (
+            "python-observed-only"
+            if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY
+            else "rust-legacy"
+        )
 
     @property
     def discovery_core_count(self) -> int:
-        return max(self.discovery_workers_by_msa.values(), default=0) if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY else self.ncores
+        return (
+            max(self.discovery_workers_by_msa.values(), default=0)
+            if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY
+            else self.ncores
+        )
 
     # Run Settings
     output: pathlib.Path = pathlib.Path("./output")
@@ -55,6 +64,14 @@ class Config:
     input_bedfile: pathlib.Path | None = None
     version: str = version("primalscheme3")
     ncores = 1
+    # Panel selector settings. Legacy remains the historical default.
+    selection_algorithm: str = "legacy"
+    coverage_metric: str = "full-span"
+    coverage_target: float = 0.90
+    optimizer_seed: int = 0
+    optimizer_starts: int = 4
+    optimizer_repair_rounds: int = 2
+    optimizer_time_limit: float = 120.0
     # Scheme Settings
     n_pools: int = 2
     min_overlap: int = 10
@@ -109,9 +126,45 @@ class Config:
 
     def __init__(self, **kwargs: Any) -> None:
         self.discovery_workers_by_msa = {}
+        for field in (
+            "coverage_target",
+            "optimizer_seed",
+            "optimizer_starts",
+            "optimizer_repair_rounds",
+            "optimizer_time_limit",
+        ):
+            if type(kwargs.get(field)) is bool:
+                raise ValueError(f"{field} must be numeric, not boolean")
         self.assign_kwargs(**kwargs)
-        if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY and (self.downsample or self.use_annealing):
-            raise ValueError("observed-only Python discovery does not support experimental downsampling or annealing mode")
+        if self.selection_algorithm not in {"legacy", "coverage"}:
+            raise ValueError("selection_algorithm must be legacy or coverage")
+        if self.coverage_metric not in {"full-span", "primer-trimmed"}:
+            raise ValueError("coverage_metric must be full-span or primer-trimmed")
+        if (
+            not math.isfinite(self.coverage_target)
+            or not 0 <= self.coverage_target <= 1
+        ):
+            raise ValueError("coverage_target must be finite and between zero and one")
+        if (
+            not math.isfinite(self.optimizer_time_limit)
+            or self.optimizer_time_limit <= 0
+        ):
+            raise ValueError("optimizer_time_limit must be positive and finite")
+        if type(self.optimizer_seed) is not int:
+            raise ValueError("optimizer_seed must be an integer")
+        if type(self.optimizer_starts) is not int or self.optimizer_starts <= 0:
+            raise ValueError("optimizer_starts must be a positive integer")
+        if (
+            type(self.optimizer_repair_rounds) is not int
+            or self.optimizer_repair_rounds < 0
+        ):
+            raise ValueError("optimizer_repair_rounds must be a nonnegative integer")
+        if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY and (
+            self.downsample or self.use_annealing
+        ):
+            raise ValueError(
+                "observed-only Python discovery does not support experimental downsampling or annealing mode"
+            )
         if self.amplicon_size_metric == AmpliconSizeMetric.REFERENCE_SPAN:
             for bound in ("amplicon_size_min", "amplicon_size_max"):
                 if kwargs.get(bound) is not None and getattr(self, bound) <= 0:
@@ -122,12 +175,42 @@ class Config:
         if self.amplicon_size_max == 0:
             self.amplicon_size_max = int(self.amplicon_size * 1.1)
         if self.amplicon_size_metric == AmpliconSizeMetric.REFERENCE_SPAN:
-            if not 0 < self.amplicon_size_min <= self.amplicon_size <= self.amplicon_size_max:
-                raise ValueError("Amplicon sizes must satisfy 0 < minimum <= nominal target <= maximum")
+            if (
+                not 0
+                < self.amplicon_size_min
+                <= self.amplicon_size
+                <= self.amplicon_size_max
+            ):
+                raise ValueError(
+                    "Amplicon sizes must satisfy 0 < minimum <= nominal target <= maximum"
+                )
             if self.mapping != MappingType.FIRST:
-                raise ValueError("reference-span amplicon bounds require --mapping first; consensus mapping uses alignment columns")
+                raise ValueError(
+                    "reference-span amplicon bounds require --mapping first; consensus mapping uses alignment columns"
+                )
             if self.circular or self.input_bedfile is not None:
-                raise ValueError("reference-span amplicon bounds require fresh linear design without imported primer pairs")
+                raise ValueError(
+                    "reference-span amplicon bounds require fresh linear design without imported primer pairs"
+                )
+        if self.selection_algorithm == "coverage":
+            if self.amplicon_size_metric != AmpliconSizeMetric.REFERENCE_SPAN:
+                raise ValueError(
+                    "coverage selection requires explicit reference-span amplicon bounds"
+                )
+            if self.mapping != MappingType.FIRST:
+                raise ValueError("coverage selection requires --mapping first")
+            if not self.use_matchdb:
+                raise ValueError(
+                    "coverage selection requires supplied-MSA specificity (--use-matchdb)"
+                )
+            if self.mismatch_product_size <= 0:
+                raise ValueError(
+                    "coverage selection requires a positive mispriming product size"
+                )
+            if self.downsample or self.use_annealing:
+                raise ValueError(
+                    "coverage selection does not support experimental downsampling or annealing"
+                )
         if self.high_gc:
             self.primer_size_min = self._primer_size_hgc_min
             self.primer_size_max = self._primer_size_hgc_max
@@ -185,7 +268,11 @@ class Config:
             if value is None:
                 continue
 
-            if key in {"discovery_backend", "discovery_core_count", "discovery_workers_by_msa"}:
+            if key in {
+                "discovery_backend",
+                "discovery_core_count",
+                "discovery_workers_by_msa",
+            }:
                 continue  # Computed from effective policy, never caller-controlled.
 
             if key == "input_bedfile":
