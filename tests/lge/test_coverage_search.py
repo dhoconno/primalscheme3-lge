@@ -182,29 +182,70 @@ def test_tiny_exhaustive_objective_uses_independent_assignment_enumeration(
 
 def test_three_pool_repool_preserves_displaced_coverage():
     cat = graph_catalog(
-        [
-            ("A", "a", 0, 100),
-            ("B", "b", 0, 100),
-            ("C", "c", 0, 100),
-            ("D", "d", 0, 100),
-            ("E", "e", 0, 100),
-        ],
-        {t: 100 for t in "abcde"},
+        [(name, name.lower(), 0, 100) for name in "ABCDEFG"],
+        {target: 100 for target in "abcdefg"},
     )
-    # D cannot enter any baseline pool. Move A to pool1 (B compatible),
-    # placing D in pool0; moving C beside A/B then permits E in pool2.
-    edges = [("D", x) for x in "ABC"] + [("E", x) for x in "ABCD"]
-    base = tuple(Assignment(x, p) for x, p in zip("ABC", range(3), strict=False))
+    edges = [
+        ("A", "C"),
+        ("A", "D"),
+        ("A", "E"),
+        ("A", "G"),
+        ("B", "D"),
+        ("B", "F"),
+        ("B", "G"),
+        ("C", "D"),
+        ("C", "F"),
+        ("D", "E"),
+        ("D", "F"),
+    ]
+    # Construction leaves [A,B] / [C,E] / [D,G]. F conflicts with B,
+    # C and D, one blocker in every pool. Moving B beside C/E is legal
+    # and frees the first pool for F beside A without losing any target.
+    greedy = run(
+        cat,
+        edges,
+        profile=limits(3),
+        options=SearchOptions(starts=1, repair_rounds=0),
+    )
     result = run(
         cat,
         edges,
         profile=limits(3),
-        baseline=base,
         options=SearchOptions(starts=1, repair_rounds=1),
     )
-    assert sum(covered(cat, result.assignments).values()) == 500
-    assert len({a.candidate_id for a in result.assignments}) == 5
-    assert len({a.pool for a in result.assignments if a.candidate_id in "ABC"}) == 1
+    before = {a.candidate_id: a.pool for a in greedy.assignments}
+    after = {a.candidate_id: a.pool for a in result.assignments}
+    assert before == {"A": 0, "B": 0, "C": 1, "D": 2, "E": 1, "G": 2}
+    assert {before[a] for a, b in edges if b == "F"} == {0, 1, 2}
+    assert covered(cat, greedy.assignments) == {
+        "a": 100,
+        "b": 100,
+        "c": 100,
+        "d": 100,
+        "e": 100,
+        "f": 0,
+        "g": 100,
+    }
+    assert greedy.metadata["repairs_accepted"] == 0
+    assert sum(covered(cat, result.assignments).values()) == 700
+    assert len(result.assignments) == len(after) == 7
+    assert set(before) < set(after)
+    assert set(after.values()) == {0, 1, 2}
+    assert all(after[a] != after[b] for a, b in edges)
+    # Pool relationships prove relocation even if symmetric pool labels change.
+    assert before["A"] == before["B"]
+    assert after["B"] == after["C"] == after["E"]
+    assert after["A"] == after["F"] != after["B"]
+    assert result.metadata["repairs_accepted"] > 0
+    assert result.metadata["completed_starts"] == 1
+    assert result.metadata["objective_history"][-1]["phase"] == "repair:0:0"
+    assert independent_objective(
+        cat, result.assignments, limits(3)
+    ) < independent_objective(
+        cat,
+        greedy.assignments,
+        limits(3),
+    )
 
 
 def test_seed_and_permutations_preserve_assignments_and_work_counts():
