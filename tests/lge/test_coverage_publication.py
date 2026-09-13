@@ -282,7 +282,9 @@ def test_full_empty_pipeline_publishes_linked_versioned_contract(tmp_path):
         started_at=time.monotonic(),
         execution_start=execution_start,
     )
-    native = json.loads((output / "config.json").read_text())["panel_optimizer"]
+    config_json = json.loads((output / "config.json").read_text())
+    assert config_json["offline_plots"] is False
+    native = config_json["panel_optimizer"]
     assert native["toolVersion"] == "3.3.0+lge.3"
     assert native["options"]["coverage_target"] == 0.9
     assert native["catalog"]["schemaVersion"] == "primalscheme3.coverage-catalog/v1"
@@ -293,6 +295,7 @@ def test_full_empty_pipeline_publishes_linked_versioned_contract(tmp_path):
     assert optimizer["final_objective"][4] == 0
     provenance = json.loads((output / native["provenance"]["path"]).read_text())
     assert provenance["status"] == "success"
+    assert provenance["resolvedOptions"]["offline_plots"] is False
     for descriptor in provenance["outputs"]:
         payload = (output / descriptor["path"]).read_bytes()
         assert len(payload) == descriptor["size"]

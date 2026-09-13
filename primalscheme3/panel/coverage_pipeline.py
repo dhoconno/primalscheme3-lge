@@ -349,6 +349,7 @@ def run_coverage_pipeline(
         }
         _write_json(output_dir / "panel-optimizer.json", optimizer)
         config_dict["output"] = "."
+        config_dict["offline_plots"] = offline_plots
         config_dict["msa_data"] = msa_data
         config_dict["panel_optimizer"] = {
             "schemaVersion": "primalscheme3.panel-native-integration/v1",
