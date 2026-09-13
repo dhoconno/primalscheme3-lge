@@ -15,6 +15,8 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
+from primalscheme3.core.logger import close_owned_file_handlers
+
 CAPABILITIES_SCHEMA = "primalscheme3.capabilities/v1"
 PROVENANCE_SCHEMA = "primalscheme3.panel-provenance/v1"
 
@@ -202,6 +204,8 @@ def _flush_logger(logger: Any | None) -> None:
                 file.flush()
         except (AttributeError, OSError):
             continue
+    if logger is not None:
+        close_owned_file_handlers(logger)
 
 
 def finalize_provenance(

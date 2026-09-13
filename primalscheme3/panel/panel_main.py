@@ -42,6 +42,7 @@ from primalscheme3.panel.panel_classes import (
 class _CoverageInvocationState:
     output_owned: bool = False
     provenance_finalized: bool = False
+    logger: object | None = None
 
 
 def mean_gc_diff(seqs: list[str] | set[str], target_gc=0.5) -> float:
@@ -148,6 +149,8 @@ def _panelcreate_impl(
 
     ## Set up the logger
     logger = setup_rich_logger(str(OUTPUT_DIR / "work" / "file.log"))
+    if invocation_state is not None:
+        invocation_state.logger = logger
 
     # Check
     if mode != PanelRunModes.REGION_ONLY and max_amplicons_region_group is not None:
@@ -708,6 +711,7 @@ def panelcreate(
                 exit_status=1,
                 stderr=str(error),
                 scientific={"selectionAlgorithm": "coverage"},
+                logger=invocation_state.logger,
                 execution_start=execution_start,
             )
             invocation_state.provenance_finalized = True

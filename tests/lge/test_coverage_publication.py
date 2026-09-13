@@ -16,6 +16,7 @@ from primalschemers import FKmer, RKmer
 
 from primalscheme3.core.classes import PrimerPair
 from primalscheme3.core.config import Config
+from primalscheme3.core.logger import setup_rich_logger
 from primalscheme3.core.mapping import create_mapping, ref_index_to_msa
 from primalscheme3.core.seq_functions import reverse_complement
 from primalscheme3.panel.coverage_catalog import build_catalog, write_catalog
@@ -300,3 +301,85 @@ def test_full_empty_pipeline_publishes_linked_versioned_contract(tmp_path):
         payload = (output / descriptor["path"]).read_bytes()
         assert len(payload) == descriptor["size"]
         assert hashlib.sha256(payload).hexdigest() == descriptor["sha256"]
+
+
+def test_finalized_file_log_stays_byte_stable_during_later_coverage_run(tmp_path):
+    root_logger = logging.getLogger()
+    original_handlers = list(root_logger.handlers)
+    original_level = root_logger.level
+    for handler in original_handlers:
+        root_logger.removeHandler(handler)
+
+    def run_empty(output, source, logger):
+        execution_start = capture_execution_identity([source])
+        (output / "work").mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, output / "work" / "0000-input.fasta")
+        msa = _msa(0)
+        msa.primerpairs = []
+        msa.fkmers = []
+        msa.rkmers = []
+        config = Config(
+            selection_algorithm="coverage",
+            amplicon_size=200,
+            amplicon_size_min=150,
+            amplicon_size_max=280,
+            amplicon_size_metric="reference-span",
+            mismatch_product_size=2000,
+            optimizer_starts=1,
+            optimizer_repair_rounds=0,
+            optimizer_time_limit=1,
+        )
+        run_coverage_pipeline(
+            msa_dict={0: msa},
+            msa_data={0: {"msa_path": "work/0000-input.fasta"}},
+            input_records=[
+                {
+                    "sourcePath": str(source),
+                    "storedPath": "work/0000-input.fasta",
+                    "sourceIndex": 0,
+                }
+            ],
+            output_dir=output,
+            config=config,
+            config_dict={**config.to_dict(), "mode": "equal"},
+            max_amplicons=0,
+            max_amplicons_msa=0,
+            offline_plots=False,
+            logger=logger,
+            argv=["primalscheme3", "panel-create"],
+            started_at=time.monotonic(),
+            execution_start=execution_start,
+        )
+
+    try:
+        first_source = tmp_path / "first.fasta"
+        first_source.write_text(f">ref\n{REFERENCE}\n")
+        first_output = tmp_path / "first"
+        (first_output / "work").mkdir(parents=True)
+        first_logger = setup_rich_logger(str(first_output / "work" / "file.log"))
+        run_empty(first_output, first_source, first_logger)
+        first_provenance = json.loads(
+            (first_output / "panel-provenance.json").read_text()
+        )
+        first_log = first_output / "work" / "file.log"
+        finalized_bytes = first_log.read_bytes()
+
+        second_source = tmp_path / "second.fasta"
+        second_source.write_text(f">ref\n{REFERENCE}\n")
+        run_empty(
+            tmp_path / "second",
+            second_source,
+            logging.getLogger("later-coverage-run"),
+        )
+
+        assert first_log.read_bytes() == finalized_bytes
+        for descriptor in first_provenance["outputs"]:
+            payload = (first_output / descriptor["path"]).read_bytes()
+            assert len(payload) == descriptor["size"]
+            assert hashlib.sha256(payload).hexdigest() == descriptor["sha256"]
+    finally:
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
+            handler.close()
+        root_logger.handlers.extend(original_handlers)
+        root_logger.setLevel(original_level)
