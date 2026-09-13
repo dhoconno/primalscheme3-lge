@@ -6,6 +6,7 @@ import json
 import pathlib
 import shutil
 import sys
+from dataclasses import dataclass
 from time import monotonic
 
 import dnaio
@@ -35,6 +36,12 @@ from primalscheme3.panel.panel_classes import (
     Region,
     RegionParser,
 )
+
+
+@dataclass
+class _CoverageInvocationState:
+    output_owned: bool = False
+    provenance_finalized: bool = False
 
 
 def mean_gc_diff(seqs: list[str] | set[str], target_gc=0.5) -> float:
@@ -76,6 +83,7 @@ def _panelcreate_impl(
     executed_argv: list[str] | None = None,
     execution_start: dict | None = None,
     workflow_started_at: float | None = None,
+    invocation_state: _CoverageInvocationState | None = None,
 ):
     coverage_started_at = (
         workflow_started_at if workflow_started_at is not None else monotonic()
@@ -130,6 +138,9 @@ def _panelcreate_impl(
     # See if the output dir already exists
     if OUTPUT_DIR.is_dir() and not force:
         raise UsageError(f"{OUTPUT_DIR} already exists, please use --force to override")
+
+    if invocation_state is not None:
+        invocation_state.output_owned = True
 
     # Create the output dir and a work subdir
     pathlib.Path.mkdir(OUTPUT_DIR, exist_ok=True)
@@ -394,6 +405,7 @@ def _panelcreate_impl(
             argv=executed_argv or list(sys.argv),
             started_at=coverage_started_at,
             execution_start=execution_start,
+            invocation_state=invocation_state,
         )
 
     ## Digestion finished, now create the panel
@@ -635,6 +647,7 @@ def panelcreate(
 
     started_at = monotonic()
     execution_start = None
+    invocation_state = _CoverageInvocationState()
     if config.selection_algorithm == "coverage":
         from primalscheme3.panel.coverage_provenance import capture_execution_identity
 
@@ -656,14 +669,15 @@ def panelcreate(
             executed_argv=executed_argv,
             execution_start=execution_start,
             workflow_started_at=started_at,
+            invocation_state=invocation_state,
         )
     except Exception as error:
         output = pathlib.Path(output_dir).absolute()
-        provenance = output / "panel-provenance.json"
         if (
             config.selection_algorithm == "coverage"
+            and invocation_state.output_owned
+            and not invocation_state.provenance_finalized
             and output.is_dir()
-            and not provenance.exists()
         ):
             from primalscheme3.panel.coverage_provenance import finalize_provenance
 
@@ -696,4 +710,5 @@ def panelcreate(
                 scientific={"selectionAlgorithm": "coverage"},
                 execution_start=execution_start,
             )
+            invocation_state.provenance_finalized = True
         raise

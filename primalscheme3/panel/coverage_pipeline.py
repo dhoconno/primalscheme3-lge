@@ -288,6 +288,7 @@ def run_coverage_pipeline(
     argv: list[str],
     started_at: float,
     execution_start: dict[str, Any] | None,
+    invocation_state: Any | None = None,
 ) -> CoveragePublication:
     """Build, optimize, publish, and finally hash a coverage panel run."""
 
@@ -413,6 +414,8 @@ def run_coverage_pipeline(
             logger=logger,
             execution_start=execution_start,
         )
+        if invocation_state is not None:
+            invocation_state.provenance_finalized = True
         return publication
     except Exception as error:
         logger.exception("Coverage panel failed")
@@ -430,4 +433,6 @@ def run_coverage_pipeline(
             logger=logger,
             execution_start=execution_start,
         )
+        if invocation_state is not None:
+            invocation_state.provenance_finalized = True
         raise

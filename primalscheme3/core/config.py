@@ -127,14 +127,43 @@ class Config:
     def __init__(self, **kwargs: Any) -> None:
         self.discovery_workers_by_msa = {}
         for field in (
-            "coverage_target",
             "optimizer_seed",
             "optimizer_starts",
             "optimizer_repair_rounds",
-            "optimizer_time_limit",
         ):
+            if field in kwargs and type(kwargs[field]) is not int:
+                raise ValueError(f"{field} must be an integer")
+        for field in ("coverage_target", "optimizer_time_limit"):
             if type(kwargs.get(field)) is bool:
                 raise ValueError(f"{field} must be numeric, not boolean")
+        coverage_requested = kwargs.get("selection_algorithm", "legacy") == "coverage"
+        if coverage_requested:
+            for field in (
+                "amplicon_size",
+                "amplicon_size_min",
+                "amplicon_size_max",
+                "n_pools",
+                "ncores",
+                "min_overlap",
+                "mismatch_product_size",
+                "editdist_max",
+            ):
+                value = kwargs.get(field)
+                if value is not None and type(value) is not int:
+                    raise ValueError(f"coverage {field} must be an integer")
+            for field in (
+                "min_base_freq",
+                "dimer_score",
+                "primer_tm_min",
+                "primer_tm_max",
+                "primer_hairpin_th_max",
+                "mv_conc",
+                "dv_conc",
+                "dntp_conc",
+                "dna_conc",
+            ):
+                if type(kwargs.get(field)) is bool:
+                    raise ValueError(f"coverage {field} must be numeric, not boolean")
         self.assign_kwargs(**kwargs)
         if self.selection_algorithm not in {"legacy", "coverage"}:
             raise ValueError("selection_algorithm must be legacy or coverage")
@@ -193,6 +222,34 @@ class Config:
                     "reference-span amplicon bounds require fresh linear design without imported primer pairs"
                 )
         if self.selection_algorithm == "coverage":
+            for field in (
+                "amplicon_size",
+                "amplicon_size_min",
+                "amplicon_size_max",
+                "n_pools",
+                "ncores",
+                "mismatch_product_size",
+            ):
+                value = getattr(self, field)
+                if type(value) is not int or value <= 0:
+                    raise ValueError(f"coverage {field} must be a positive integer")
+            if type(self.min_overlap) is not int or self.min_overlap < 0:
+                raise ValueError("coverage min_overlap must be a nonnegative integer")
+            for field in (
+                "min_base_freq",
+                "dimer_score",
+                "primer_tm_min",
+                "primer_tm_max",
+                "primer_hairpin_th_max",
+                "mv_conc",
+                "dv_conc",
+                "dntp_conc",
+                "dna_conc",
+            ):
+                if not math.isfinite(getattr(self, field)):
+                    raise ValueError(f"coverage {field} must be finite")
+            if not 0 <= self.min_base_freq <= 1:
+                raise ValueError("coverage min_base_freq must be between zero and one")
             if self.amplicon_size_metric != AmpliconSizeMetric.REFERENCE_SPAN:
                 raise ValueError(
                     "coverage selection requires explicit reference-span amplicon bounds"

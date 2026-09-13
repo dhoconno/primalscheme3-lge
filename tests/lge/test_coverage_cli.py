@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from unittest.mock import patch
@@ -94,8 +95,13 @@ def test_legacy_explicit_zero_cli_and_programmatic_product_size_contract(tmp_pat
         result = CliRunner().invoke(
             app,
             [
-                "panel-create", "--msa", str(msa), "--output", str(tmp_path / "out"),
-                "--mispriming-product-size", "0",
+                "panel-create",
+                "--msa",
+                str(msa),
+                "--output",
+                str(tmp_path / "out"),
+                "--mispriming-product-size",
+                "0",
             ],
         )
     assert result.exit_code == 0, result.output
@@ -303,3 +309,165 @@ def test_coverage_discovery_failure_retains_failure_provenance(tmp_path):
     assert record["stderr"] == "synthetic discovery failure"
     assert record["inputs"][0]["storedMissing"] is False
     assert record["inputs"][0]["sourceAtStartMatchesStored"] is True
+
+
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def test_forced_discovery_failure_replaces_stale_success_with_current_final_bytes(
+    tmp_path,
+):
+    source = _input(tmp_path)
+    output = tmp_path / "out"
+    (output / "work").mkdir(parents=True)
+    (output / "old-result.txt").write_text("previous bytes")
+    (output / "panel-provenance.json").write_text(
+        '{"status":"success","exitStatus":0,"marker":"previous run"}'
+    )
+    config = Config(
+        selection_algorithm="coverage",
+        amplicon_size=200,
+        amplicon_size_min=150,
+        amplicon_size_max=280,
+        amplicon_size_metric="reference-span",
+        mismatch_product_size=2000,
+    )
+    argv = ["primalscheme3", "panel-create", "--force", "--msa", str(source)]
+    with patch(
+        "primalscheme3.panel.panel_main.PanelMSA",
+        side_effect=RuntimeError("synthetic new-run discovery failure"),
+    ):
+        with pytest.raises(RuntimeError, match="synthetic new-run discovery failure"):
+            panelcreate(
+                [source],
+                output,
+                config,
+                None,
+                mode=PanelRunModes.EQUAL,
+                force=True,
+                executed_argv=argv,
+            )
+    record = json.loads((output / "panel-provenance.json").read_text())
+    assert record["status"] == "failure"
+    assert record["exitStatus"] == 1
+    assert record["command"]["argv"] == argv
+    assert record["inputs"][0]["sourceAtStartMatchesStored"] is True
+    assert record["inputs"][0]["sourcePath"] == str(source.resolve())
+    for descriptor in record["outputs"]:
+        data = (output / descriptor["path"]).read_bytes()
+        assert len(data) == descriptor["size"]
+        assert hashlib.sha256(data).hexdigest() == descriptor["sha256"]
+    assert {item["path"] for item in record["outputs"]} == {
+        "old-result.txt",
+        "work/0000-input.fasta",
+        "work/file.log",
+    }
+
+
+def test_nonforce_and_preflight_rejections_preserve_existing_output_bytes(tmp_path):
+    source = _input(tmp_path)
+    config = Config(
+        selection_algorithm="coverage",
+        amplicon_size=200,
+        amplicon_size_min=150,
+        amplicon_size_max=280,
+        amplicon_size_metric="reference-span",
+        mismatch_product_size=2000,
+    )
+    for label, mode, force in (
+        ("nonforce", PanelRunModes.EQUAL, False),
+        ("preflight", PanelRunModes.ENTROPY, True),
+    ):
+        output = tmp_path / label
+        (output / "work").mkdir(parents=True)
+        (output / "work" / "existing.bin").write_bytes(b"unchanged\x00bytes")
+        (output / "panel-provenance.json").write_text('{"marker":"existing"}')
+        before = _tree_bytes(output)
+        with pytest.raises(UsageError):
+            panelcreate([source], output, config, None, mode=mode, force=force)
+        assert _tree_bytes(output) == before
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("optimizer_starts", 1.7),
+        ("optimizer_seed", 1.7),
+        ("optimizer_repair_rounds", 1.7),
+    ],
+)
+def test_optimizer_integers_reject_fractional_values_before_coercion(field, value):
+    with pytest.raises(ValueError, match="integer"):
+        Config(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("n_pools", True),
+        ("mismatch_product_size", True),
+        ("amplicon_size", 200.5),
+        ("amplicon_size_min", True),
+        ("amplicon_size_max", 280.5),
+        ("ncores", True),
+        ("dimer_score", True),
+        ("dimer_score", float("nan")),
+        ("min_base_freq", True),
+        ("min_base_freq", float("nan")),
+        ("min_base_freq", 1.1),
+    ],
+)
+def test_coverage_scientific_numerics_reject_invalid_raw_values(field, value):
+    options = {
+        "selection_algorithm": "coverage",
+        "amplicon_size": 200,
+        "amplicon_size_min": 150,
+        "amplicon_size_max": 280,
+        "amplicon_size_metric": "reference-span",
+        "mismatch_product_size": 2000,
+    }
+    options[field] = value
+    with pytest.raises(ValueError):
+        Config(**options)
+
+
+def test_legacy_scientific_config_coercion_and_positive_product_size_remain_compatible():
+    config = Config(n_pools=1.7, mismatch_product_size=True)
+    assert config.n_pools == 1
+    assert config.mismatch_product_size == 1
+
+
+@pytest.mark.parametrize("flag", ["--dimer-score", "--min-base-freq"])
+def test_coverage_cli_rejects_nan_discovery_settings_before_workflow(tmp_path, flag):
+    source = _input(tmp_path)
+    output = tmp_path / "out"
+    args = [
+        "panel-create",
+        "--msa",
+        str(source),
+        "--output",
+        str(output),
+        "--mode",
+        "equal",
+        "--selection-algorithm",
+        "coverage",
+        "--amplicon-size",
+        "200",
+        "--amplicon-size-min",
+        "150",
+        "--amplicon-size-max",
+        "280",
+        flag,
+        "nan",
+    ]
+    with patch(
+        "primalscheme3.cli.panelcreate", side_effect=AssertionError("workflow called")
+    ):
+        result = CliRunner().invoke(app, args)
+    assert result.exit_code == 2, result.output + repr(result.exception)
+    assert not output.exists()
