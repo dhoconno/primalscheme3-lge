@@ -55,15 +55,50 @@ def _rows(msa: Any) -> tuple[tuple[str, ...], ...]:
     )
 
 
+def _canonical_oligos(kmer: Any) -> tuple[str, ...]:
+    return tuple(sorted({str(sequence).upper() for sequence in kmer.seqs()}))
+
+
+def _native_candidate_signature(msa: Any) -> tuple[tuple[Any, ...], ...]:
+    signatures = set()
+    for pair in msa.primerpairs:
+        forward_oligos = _canonical_oligos(pair.fprimer)
+        reverse_oligos = _canonical_oligos(pair.rprimer)
+        forward_end = int(pair.fprimer.end)
+        reverse_start = int(pair.rprimer.start)
+        signatures.add(
+            (
+                (
+                    forward_end - max(map(len, forward_oligos)),
+                    reverse_start + max(map(len, reverse_oligos)),
+                ),
+                (forward_end, reverse_start),
+                forward_oligos,
+                reverse_oligos,
+            )
+        )
+    return tuple(sorted(signatures))
+
+
 def _target_records(msa_dict: dict[Any, Any]) -> tuple[tuple[Target, Any], ...]:
-    entries = sorted(
-        msa_dict.items(), key=lambda item: (int(item[1].msa_index), str(item[0]))
+    entries = [
+        (
+            _digest({"rows": rows}),
+            _native_candidate_signature(msa),
+            int(msa.msa_index),
+            str(source_key),
+            rows,
+            msa,
+        )
+        for source_key, msa in msa_dict.items()
+        for rows in (_rows(msa),)
+    ]
+    entries.sort(
+        key=lambda entry: (entry[0], entry[1], entry[2], entry[3])
     )
     content_counts: Counter[str] = Counter()
     records: list[tuple[Target, Any]] = []
-    for _, msa in entries:
-        rows = _rows(msa)
-        content_key = _digest({"rows": rows})
+    for content_key, _, _, _, rows, msa in entries:
         occurrence = content_counts[content_key]
         content_counts[content_key] += 1
         target_id = f"target-{content_key}-{occurrence}"
@@ -113,10 +148,6 @@ def _target_records(msa_dict: dict[Any, Any]) -> tuple[tuple[Target, Any], ...]:
             )
         )
     return tuple(sorted(records, key=lambda record: record[0].id))
-
-
-def _canonical_oligos(kmer: Any) -> tuple[str, ...]:
-    return tuple(sorted({str(sequence).upper() for sequence in kmer.seqs()}))
 
 
 def _base_match(primer_base: str, row_base: str) -> str:

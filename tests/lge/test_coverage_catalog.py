@@ -136,6 +136,41 @@ def test_duplicate_target_inputs_remain_distinct_deterministic_occurrences():
     assert len({candidate.target_id for candidate in catalog.candidates}) == 2
 
 
+def test_duplicate_occurrences_follow_candidate_science_when_sources_are_renumbered():
+    def alternate_pair(source_index):
+        return PrimerPair(
+            FKmer([REFERENCE[20:28].encode()], 28),
+            RKmer([reverse_complement(REFERENCE[50:58]).encode()], 50),
+            source_index,
+        )
+
+    first_a = synthetic_msa(2, [REFERENCE], [native_pair(2)])
+    first_b = synthetic_msa(9, [REFERENCE], [alternate_pair(9)])
+    first = build_catalog({2: first_a, 9: first_b}, Config())
+
+    renumbered_a = synthetic_msa(99, [REFERENCE], [native_pair(99)])
+    renumbered_b = synthetic_msa(0, [REFERENCE], [alternate_pair(0)])
+    renumbered = build_catalog({0: renumbered_b, 99: renumbered_a}, Config())
+
+    first_association = {
+        candidate.full_interval: candidate.target_id
+        for candidate in first.candidates
+    }
+    renumbered_association = {
+        candidate.full_interval: candidate.target_id
+        for candidate in renumbered.candidates
+    }
+    assert first_association == renumbered_association
+    assert first.semantic_digest == renumbered.semantic_digest
+
+    first_sources = dict(first.source_mapping)
+    renumbered_sources = dict(renumbered.source_mapping)
+    assert first_sources[2] == first_association[(10, 50)]
+    assert first_sources[9] == first_association[(20, 58)]
+    assert renumbered_sources[99] == renumbered_association[(10, 50)]
+    assert renumbered_sources[0] == renumbered_association[(20, 58)]
+
+
 def test_gapped_first_row_uses_ungapped_reference_denominator_and_mapping():
     gapped_reference = REFERENCE[:15] + "--" + REFERENCE[15:]
     pair = native_pair(4)
