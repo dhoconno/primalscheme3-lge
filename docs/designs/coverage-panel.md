@@ -75,6 +75,7 @@ LGE keeps the managed `3.3.0+lge.2` runtime for legacy designs. A coverage run m
 use the local executable override and repeat `--msa` for every input:
 
 ```sh
+cd /Users/dho/Documents/lungfish-genome-explorer/.worktrees/primalscheme-panel-optimizer
 .build/debug/lungfish-cli primers design primalscheme3 \
   --msa A.lungfishmsa --msa B.lungfishmsa \
   --output HLA-coverage.lungfishprimeranalysis \
@@ -94,8 +95,11 @@ two repair rounds, 120 seconds and a 2,000-base inclusive specificity-product
 bound. The selector time applies only to search; discovery, final native validation,
 LGE publication and bundle loading occur outside it. Coverage mode additionally
 requires equal combined whole-MSA inputs, first-reference mapping, linear sequence,
-MatchDB enabled, observed-only terminal-gap handling and explicit resolved reference
-span bounds. Count caps default to unlimited, and omitted high-GC resolves false.
+MatchDB enabled, one or more pools and explicit resolved reference span bounds. Both
+`legacy` and `observed-only` terminal-gap policies are supported. The native CLI
+defaults to two pools and `legacy`; the LGE frontend defaults to two pools and
+`observed-only`. The example and all three HLA benchmarks use two pools and
+`observed-only`. Count caps default to unlimited, and omitted high-GC resolves false.
 Legacy remains the default selector and retains its old argv and behavior.
 
 ## September 2026 benchmark evidence
