@@ -58,3 +58,128 @@ Native `--capabilities-json` returns schema/version, exact package identity, sup
 Tests are synthetic interval/sequence or human/MHC only. Cover stable IDs under input permutation and object recreation, duplicated target handling, gapped first reference, partial/disjoint row support, asymmetric/cross-MSA hits, zero product limits, within-candidate products, reverse complement orientation, overlap across different pools, caps, deterministic seeded search, greedy counterexample repair, and timeout returning a valid incumbent. Independently enumerate tiny feasible graphs for an objective oracle. Compare incremental results to fresh validation after mutations.
 
 Run existing 33 LGE-fork regressions; focused Swift CLI/options/publication checks; native HLA wide and narrow controls; and a deterministic interval-only 100-target scaling fixture. Label the last as synthetic algorithm scaling, not a representative 100-MSA wet-lab or biological benchmark. Preserve all benchmark provenance. No universal speedup or >90%-coverage promise is a release criterion; correctness, honest metadata and improvement of known feasible counterexamples are.
+
+## Local use
+
+The coverage selector is available only from the unpublished local `3.3.0+lge.3`
+fork. Install it into this repository's existing virtual environment without resolving
+or changing the inherited environment:
+
+```sh
+cd /Users/dho/Documents/lungfish-genome-explorer/.worktrees/primalscheme-panel-fork
+.venv/bin/python -m pip install --no-deps --no-build-isolation -e .
+.venv/bin/primalscheme3 --capabilities-json
+```
+
+LGE keeps the managed `3.3.0+lge.2` runtime for legacy designs. A coverage run must
+use the local executable override and repeat `--msa` for every input:
+
+```sh
+.build/debug/lungfish-cli primers design primalscheme3 \
+  --msa A.lungfishmsa --msa B.lungfishmsa \
+  --output HLA-coverage.lungfishprimeranalysis \
+  --grouping combined \
+  --primalscheme3-path ../primalscheme-panel-fork/.venv/bin/primalscheme3 \
+  --amplicon-size 200 --amplicon-size-min 150 --amplicon-size-max 280 \
+  --pool-count 2 --minimum-base-frequency 0.0 --core-count 4 \
+  --terminal-gap-policy observed-only --dimer-score=-26.0 \
+  --selection-algorithm coverage --coverage-metric full-span \
+  --coverage-target 0.9 --optimizer-seed 0 --optimizer-starts 4 \
+  --optimizer-repair-rounds 2 --optimizer-time-limit 120 \
+  --mispriming-product-size 2000
+```
+
+The optimizer defaults shown above are full-span, target 0.9, seed 0, four starts,
+two repair rounds, 120 seconds and a 2,000-base inclusive specificity-product
+bound. The selector time applies only to search; discovery, final native validation,
+LGE publication and bundle loading occur outside it. Coverage mode additionally
+requires equal combined whole-MSA inputs, first-reference mapping, linear sequence,
+MatchDB enabled, observed-only terminal-gap handling and explicit resolved reference
+span bounds. Count caps default to unlimited, and omitted high-GC resolves false.
+Legacy remains the default selector and retains its old argv and behavior.
+
+## September 2026 benchmark evidence
+
+The final software benchmark used nine human HLA MSA bundles with 20 rows each,
+nominal size 200, two pools, default chemistry, supplied-MSA specificity, full-span
+target 0.9, seed 0, four starts and two repair rounds per start. Native source was
+clean commit `7b6148b6f80d70052fa2ed8aa3a44d4def3e8954`; LGE source was clean commit
+`bc535d90f7c95eaae2c624ff87927a85de692bcd`. The wide 120-second run reached its
+time limit after two starts. The wide 600-second run completed all four starts in
+251.364 search seconds and returned exactly the same assignment vector and objective.
+The narrow run completed all four starts in 91.653 search seconds.
+
+| Locus | Wide 150–280 full / interior | Narrow 180–220 full / interior |
+| --- | ---: | ---: |
+| A | 42.7140% / 34.7905% | 38.6157% / 31.0565% |
+| B | 62.6263% / 50.8724% | 55.3719% / 47.1993% |
+| C | 46.7757% / 40.6903% | 56.4033% / 44.6866% |
+| DPA1 | 72.9246% / 60.2810% | 58.7484% / 48.1481% |
+| DPB1 | 77.9923% / 67.5676% | 58.9447% / 50.7079% |
+| DQA1 | 94.9219% / 88.4115% | 90.1042% / 79.6875% |
+| DQB1 | 91.4758% / 80.6616% | 56.1069% / 45.5471% |
+| DRB1 | 68.9139% / 57.9276% | 64.9189% / 53.6829% |
+| E | 44.3825% / 36.3045% | 68.8951% / 60.3528% |
+
+The wide catalogue contained 50,969 candidates and selected 24 assignments. Its
+120-second run evaluated 25,730,304 frontier entries and stopped at the wall limit;
+the 600-second run evaluated 68,419,584 frontier entries, hit the declared per-unit
+construction and repair limits, and completed with no objective improvement. The
+narrow catalogue contained 16,376 candidates and selected 29 assignments; it
+evaluated 26,345,472 frontier entries and completed after hitting its configured
+construction and repair work limits. Narrow improved C and E relative to wide while
+its worst locus, A, was lower. The lexicographic objective minimizes the worst
+normalized shortfall before mean coverage and does not promise that every individual
+target improves.
+
+The corresponding LGE design wall times were 158.787 seconds for wide/120,
+290.191 seconds for wide/600 and 124.484 seconds for narrow/120. Darwin
+`/usr/bin/time -l` reported maximum resident-set high-water marks of 1,598,357,504,
+2,295,857,152 and 1,165,656,064 bytes. These are cumulative whole-process maxima,
+including discovery, validation and publication, rather than selector-only or
+simultaneous-process memory. `PrimerAnalysisBundle.load` separately checked stored
+bundle integrity; it did not rerun native biological validation. Independent Python
+verification decompressed each final catalogue, checked every bundle/native
+descriptor and stored input, reconstructed every assignment and BED row, and compared
+literal full/interior bitset unions with validation. A separate root audit repeated
+those checks for all three successful bundles.
+
+The older audit reported wide C/E full-span coverage of 84.92%/77.34% with 44
+selected amplicons and narrow C/E of 85.47%/73.63% with 45. Those historical runs
+used legacy discovery/specificity (`D=0`) and a different selection system, while the
+new results use `panel-v1`/`intended-sites-v1`, all supplied HLA rows and `D=2000`.
+They are end-to-end results under materially different profiles, not a selector-only
+speed or quality comparison and not evidence that the new selector is ready as a
+default.
+
+Exhaustive unary screening of the fixed wide catalogue under this exact profile found
+382 of 1,354 C candidates intrinsically valid. Their literal union covers at most
+913/1,101 bases (82.9246%) before pair, pool and count constraints, so the requested
+90% C objective cannot be reached merely by more selector time or more pools. This is
+a conditional ceiling for the current catalogue and `panel-v1`/
+`intended-sites-v1`, not a biological impossibility bound. E's corresponding unary
+union is 1,036/1,077 (96.1931%), but a unary bound is not an achievable scheme.
+Candidate expansion, changed profiles or a later exact/CP-SAT formulation require
+their own scientific and performance benchmarks.
+
+The four configured starts are variants of one bounded heuristic. A comparison of
+distinct selector approaches on the same frozen catalogue, profile and objective has
+been requested as a separate experiment and remains pending; the current results do
+not establish ensemble behavior.
+
+The deterministic abstract benchmark exercised the real search core on 100 synthetic
+300-base interval targets, 300 candidates and 200 declared overlap edges. One pool,
+one start and no repair selected one 260-base greedy interval per target
+(26,000/30,000 bases); one repair round selected two disjoint 150-base intervals per
+target (30,000/30,000) with graph and pool feasibility independently checked. The
+runs took 0.420 and 13.053 seconds. This is abstract-oracle algorithm evidence, not
+100 biological MSAs, primer chemistry or wet-lab scalability. Its `tracemalloc` peak
+includes retained traced baseline objects because resetting the peak does not subtract
+them, and process RSS is a cumulative maximum that includes validation before each
+sample.
+
+Full local commands, hashes, runtime/native-extension identity, input inventories,
+resource measurements, stop reasons, work counts and final-byte checks are retained
+under the ignored `outputs/task6-*` evidence roots. Published bundles preserve their
+own complete provenance; the benchmark harness refuses to overwrite an existing
+evidence directory.
