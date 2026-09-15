@@ -89,7 +89,7 @@ def _panelcreate_impl(
     coverage_started_at = (
         workflow_started_at if workflow_started_at is not None else monotonic()
     )
-    if config.selection_algorithm == "coverage":
+    if config.selection_algorithm in {"coverage", "allele-coverage"}:
         if mode != PanelRunModes.EQUAL:
             raise UsageError("coverage selection supports only whole-MSA equal mode")
         if region_bedfile is not None:
@@ -137,6 +137,8 @@ def _panelcreate_impl(
         )
 
     # See if the output dir already exists
+    if OUTPUT_DIR.exists() and config.selection_algorithm == "allele-coverage":
+        raise UsageError("allele-coverage requires a fresh output directory")
     if OUTPUT_DIR.is_dir() and not force:
         raise UsageError(f"{OUTPUT_DIR} already exists, please use --force to override")
 
@@ -206,12 +208,12 @@ def _panelcreate_impl(
 
         local_name = (
             f"{msa_index:04d}-{msa_path.name}"
-            if config.selection_algorithm == "coverage"
+            if config.selection_algorithm in {"coverage", "allele-coverage"}
             else msa_path.name
         )
         local_msa_path = OUTPUT_DIR / "work" / local_name
         read_path = msa_path
-        if config.selection_algorithm == "coverage":
+        if config.selection_algorithm in {"coverage", "allele-coverage"}:
             shutil.copyfile(msa_path, local_msa_path)
             read_path = local_msa_path
             input_records.append(
@@ -302,6 +304,25 @@ def _panelcreate_impl(
                     f"Provided genome ({msa_obj._chrom_name}) has no regions. Please remove genome or add regions"
                 )
                 sys.exit(1)
+
+    if config.selection_algorithm == "allele-coverage":
+        from primalscheme3.panel.allele_pipeline import run_allele_pipeline
+
+        return run_allele_pipeline(
+            msa_dict=msa_dict,
+            msa_data=msa_data,
+            input_records=input_records,
+            output_dir=OUTPUT_DIR,
+            config=config,
+            config_dict=config_dict,
+            max_amplicons=max_amplicons,
+            max_amplicons_msa=max_amplicons_msa,
+            logger=logger,
+            argv=executed_argv or list(sys.argv),
+            started_at=coverage_started_at,
+            execution_start=execution_start,
+            invocation_state=invocation_state,
+        )
 
     # Start the digestion loop
     for _msa_index, msa_obj in msa_dict.items():
@@ -651,7 +672,7 @@ def panelcreate(
     started_at = monotonic()
     execution_start = None
     invocation_state = _CoverageInvocationState()
-    if config.selection_algorithm == "coverage":
+    if config.selection_algorithm in {"coverage", "allele-coverage"}:
         from primalscheme3.panel.coverage_provenance import capture_execution_identity
 
         execution_start = capture_execution_identity(msa)
@@ -677,7 +698,7 @@ def panelcreate(
     except Exception as error:
         output = pathlib.Path(output_dir).absolute()
         if (
-            config.selection_algorithm == "coverage"
+            config.selection_algorithm in {"coverage", "allele-coverage"}
             and invocation_state.output_owned
             and not invocation_state.provenance_finalized
             and output.is_dir()
@@ -710,7 +731,7 @@ def panelcreate(
                 status="failure",
                 exit_status=1,
                 stderr=str(error),
-                scientific={"selectionAlgorithm": "coverage"},
+                scientific={"selectionAlgorithm": config.selection_algorithm},
                 logger=invocation_state.logger,
                 execution_start=execution_start,
             )

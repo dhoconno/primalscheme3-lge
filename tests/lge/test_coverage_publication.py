@@ -8,6 +8,7 @@ import json
 import logging
 import shutil
 import time
+from importlib.metadata import version
 from types import SimpleNamespace
 
 import numpy as np
@@ -286,7 +287,7 @@ def test_full_empty_pipeline_publishes_linked_versioned_contract(tmp_path):
     config_json = json.loads((output / "config.json").read_text())
     assert config_json["offline_plots"] is False
     native = config_json["panel_optimizer"]
-    assert native["toolVersion"] == "3.3.0+lge.3"
+    assert native["toolVersion"] == version("primalscheme3")
     assert native["options"]["coverage_target"] == 0.9
     assert native["catalog"]["schemaVersion"] == "primalscheme3.coverage-catalog/v1"
     assert native["validation"]["valid"] is True
