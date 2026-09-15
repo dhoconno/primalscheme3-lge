@@ -587,3 +587,25 @@ def test_pool_guard_reuses_valid_base_and_matches_full_diagnostics(monkeypatch):
     for ids in ((), (x.id,), (y.id,), (x.id, y.id)):
         assert oracle.pool_valid(ids) == (not oracle.pool_diagnostics(ids)["reasons"])
     assert profile().to_dict()["name"] == "allele-panel-v1"
+
+
+def test_compact_exposure_counts_never_claim_invalid_pool_is_valid():
+    a = api()
+    cat, (c,), ledger = fixture(seq=dna(seed=13))
+    policy = a.StagePolicy(
+        stage_id="salvage-1",
+        active_cutoff=-1000,
+        max_violating_edges=100,
+        max_incident_species=100,
+    )
+    oracle = a.AlleleCompatibilityOracle(cat, ledger, profile(), policy)
+    details = oracle.pool_diagnostics((c.id,))
+    assert oracle.pool_exposure_counts((c.id,)) == (
+        details["violating_edge_count"],
+        details["incident_species_count"],
+    )
+    assert oracle.pool_exposure_counts(()) == (0, 0)
+    strict = a.AlleleCompatibilityOracle(cat, ledger, profile())
+    assert not strict.pool_valid((c.id,))
+    with pytest.raises(ValueError, match="invalid pool"):
+        strict.pool_exposure_counts((c.id,))

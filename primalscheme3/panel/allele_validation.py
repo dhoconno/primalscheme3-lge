@@ -559,6 +559,21 @@ class AlleleCompatibilityOracle:
                 self._pool_states.popitem(last=False)
         return True
 
+    def pool_exposure_counts(self, configuration_ids):
+        """Exact (strict-violating edges, incident species) for a valid pool.
+
+        Invalid pools raise; callers must never turn unknown/failed guards into
+        a zero-exposure objective. Full witnesses remain pool_diagnostics work.
+        """
+        key = frozenset(configuration_ids)
+        if not self.pool_valid(key):
+            raise ValueError("exposure objective requested for invalid pool")
+        if self.cache:
+            _, edges, species = self._pool_states[key]
+            return len(edges), len(species)
+        result = self.pool_diagnostics(key)
+        return result["violating_edge_count"], result["incident_species_count"]
+
     def _chemistry(self, site):
         profiles = json.loads(self.catalog.resolved_config_json).get("profiles", {})
         measurements = {}
