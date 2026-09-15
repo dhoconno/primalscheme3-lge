@@ -9,6 +9,8 @@ import gzip
 import hashlib
 import json
 import os
+import sys
+from collections import OrderedDict
 from pathlib import Path
 from typing import Mapping, Any
 from primalscheme3.panel.coverage_types import ScientificRecord, canonical_json, semantic_id
@@ -352,6 +354,38 @@ def _history_hash_start(stream):
     return hashlib.sha256(prefix.encode())
 
 
+class _ByteLRU:
+    """Bound immutable scalar tuples, including conservative per-entry overhead."""
+    def __init__(self, budget):
+        self.budget = budget
+        self.bytes_used = 0
+        self._entries = OrderedDict()
+
+    def get(self, key):
+        entry = self._entries.get(key)
+        if entry is None:
+            return None
+        self._entries.move_to_end(key)
+        return entry[0]
+
+    def put(self, key, value):
+        size = sys.getsizeof(key) + sys.getsizeof(value) + sum(sys.getsizeof(v) for v in value) + 256
+        old = self._entries.pop(key, None)
+        if old is not None:
+            self.bytes_used -= old[1]
+        if size > self.budget:
+            return
+        while self.bytes_used + size > self.budget:
+            _, (_, removed) = self._entries.popitem(last=False)
+            self.bytes_used -= removed
+        self._entries[key] = (value, size)
+        self.bytes_used += size
+
+    def clear(self):
+        self._entries.clear()
+        self.bytes_used = 0
+
+
 class SQLiteCoverageHistory(CoverageHistory):
     """Compressed, indexed full history with bounded record-storage memory.
 
@@ -360,10 +394,17 @@ class SQLiteCoverageHistory(CoverageHistory):
     can lose only the current uncommitted batch; completed stages are durable.
     Reload verifies payload identities, references, indexes and snapshot hashes
     without materializing full record streams. One writer owns the connection.
+    The default 1 MiB hot-cache accounting budget is split 3:1 between canonical
+    payloads and reference locations; oversized entries bypass it. Zero disables
+    both caches. This is separate from the unchanged 8 MiB SQLite page cache.
     """
-    def __init__(self, directory: Path, *, run_id: str, batch_size: int = 1000):
+    def __init__(self, directory: Path, *, run_id: str, batch_size: int = 1000, hot_cache_bytes: int = 1024 * 1024):
         if type(batch_size) is not int or batch_size < 1:
             raise ValueError('batch_size must be a positive integer')
+        if type(hot_cache_bytes) is not int or hot_cache_bytes < 0:
+            raise ValueError('hot_cache_bytes must be a nonnegative integer')
+        self._payload_cache = _ByteLRU(hot_cache_bytes * 3 // 4)
+        self._reference_cache = _ByteLRU(hot_cache_bytes - hot_cache_bytes * 3 // 4)
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.run_id, self.batch_size = run_id, batch_size
@@ -409,6 +450,7 @@ class SQLiteCoverageHistory(CoverageHistory):
                 raise ValueError('history belongs to another run or unsupported schema')
             self._reload()
         except Exception:
+            self._clear_hot_caches()
             self._db.close()
             self._closed = True
             raise
@@ -440,13 +482,36 @@ class SQLiteCoverageHistory(CoverageHistory):
         if stream == 'events' and record.sequence_number != ordinal:
             raise ValueError('non-contiguous decision sequence')
         for identity, kind, expected in self._links(record):
-            row = self._db.execute('SELECT stream,position FROM records WHERE id=?', (identity,)).fetchone()
+            row = self._reference_cache.get(identity) if position is None else None
+            if row is None:
+                row = self._db.execute('SELECT stream,position FROM records WHERE id=?', (identity,)).fetchone()
+                if row is not None and position is None:
+                    self._reference_cache.put(identity, row)
             if row is None or row[0] != expected or (position is not None and row[1] >= position):
                 raise ValueError('unknown or forward ' + kind + ' reference')
         if stream == 'snapshots':
             self._validate_checkpoint(record)
 
+    def _clear_hot_caches(self):
+        self._payload_cache.clear()
+        self._reference_cache.clear()
+
+    def _cache_guard(self):
+        # data_version detects other connections; total_changes detects direct SQL
+        # on this connection. Neither cache is authoritative over edited storage.
+        version = self._db.execute('PRAGMA data_version').fetchone()[0]
+        if version != self._data_version or self._db.total_changes != self._known_changes:
+            self._clear_hot_caches()
+        if self._pending and not self._db.in_transaction:
+            self._reload()  # direct connection rollback discarded a pending tail
+        self._data_version = version
+        self._known_changes = self._db.total_changes
+
     def _reload(self):
+        self._clear_hot_caches()
+        self._counts = {name: 0 for name in self._streams}
+        self._hashes = {name: _history_hash_start(name) for name in self._streams}
+        self._pending = 0
         if self._db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or self._db.execute('PRAGMA foreign_key_check').fetchone():
             raise ValueError('corrupt history database/reference')
         if self._db.execute('SELECT 1 FROM records WHERE stream NOT IN (?,?,?,?) LIMIT 1', tuple(self._streams)).fetchone():
@@ -473,6 +538,8 @@ class SQLiteCoverageHistory(CoverageHistory):
         committed = self._db.execute("SELECT value FROM metadata WHERE key='committed_counts'").fetchone()
         if committed is None or json.loads(committed[0]) != self._counts:
             raise ValueError('corrupt history committed prefix counts')
+        self._data_version = self._db.execute('PRAGMA data_version').fetchone()[0]
+        self._known_changes = self._db.total_changes
 
     def _update_hash(self, stream, raw):
         if self._counts[stream]:
@@ -521,6 +588,20 @@ class SQLiteCoverageHistory(CoverageHistory):
                     raise ValueError('complete snapshot requires fresh dispositions for touched entities')
 
     def _append(self, stream, record):
+        try:
+            return self._append_checked(stream, record)
+        except BaseException:
+            self._clear_hot_caches()
+            raise
+
+    def _append_checked(self, stream, record):
+        self._cache_guard()
+        raw = canonical_json(record).encode()
+        hot = self._payload_cache.get(record.id)
+        if hot is not None:
+            if hot != (stream, raw):
+                raise ValueError('record identity collision')
+            return record
         existing = self._indexes[stream].get(record.id)
         if existing is not None:
             if existing != record:
@@ -528,8 +609,7 @@ class SQLiteCoverageHistory(CoverageHistory):
             return existing
         ordinal = self._counts[stream]
         self._validate_disk_record(stream, record, ordinal)
-        raw = canonical_json(record).encode()
-        self._db.execute('INSERT INTO records(stream,ordinal,id,payload,stage_id,pool,profile_id) VALUES (?,?,?,?,?,?,?)',
+        inserted = self._db.execute('INSERT INTO records(stream,ordinal,id,payload,stage_id,pool,profile_id) VALUES (?,?,?,?,?,?,?)',
                          (stream, ordinal, record.id, zlib.compress(raw, level=1), getattr(record, 'stage_id', None),
                           getattr(record, 'pool', None), getattr(record, 'profile_id', None)))
         self._db.executemany('INSERT INTO entity_records VALUES (?,?,?,?)',
@@ -539,6 +619,9 @@ class SQLiteCoverageHistory(CoverageHistory):
         self._update_hash(stream, raw)
         self._counts[stream] += 1
         self._pending += 1
+        self._payload_cache.put(record.id, (stream, raw))
+        self._reference_cache.put(record.id, (stream, inserted.lastrowid))
+        self._known_changes = self._db.total_changes
         if self._pending >= self.batch_size or stream == 'snapshots':
             self.checkpoint()
         return record
@@ -574,15 +657,26 @@ class SQLiteCoverageHistory(CoverageHistory):
 
     def checkpoint(self):
         """Durably commit all current records, including an incomplete stage tail."""
+        self._cache_guard()
         self._db.execute("UPDATE metadata SET value=? WHERE key='committed_counts'", (canonical_json(self._counts),))
         self._db.commit()
         self._pending = 0
+        self._known_changes = self._db.total_changes
+
+    def rollback(self):
+        """Discard only the uncommitted tail and revalidate the durable prefix."""
+        self._clear_hot_caches()
+        self._db.rollback()
+        self._reload()
 
     def close(self):
         if not self._closed:
-            self.checkpoint()
-            self._db.close()
-            self._closed = True
+            try:
+                self.checkpoint()
+            finally:
+                self._clear_hot_caches()
+                self._db.close()
+                self._closed = True
 
     def __enter__(self): return self
 

@@ -165,3 +165,122 @@ def test_event_range_iterator_preserves_chronological_offsets(tmp_path):
         assert list(h.iter_events(start=7)) == []
         if hasattr(h, 'close'):
             h.close()
+
+
+def test_hot_caches_match_disabled_and_skip_duplicate_decode(tmp_path, monkeypatch):
+    with history.SQLiteCoverageHistory(tmp_path/'hot', run_id='run') as hot, history.SQLiteCoverageHistory(tmp_path/'cold', run_id='run', hot_cache_bytes=0) as cold:
+        assert populate(hot) == populate(cold)
+        evidence = hot.evidence[0]
+        def unexpected(*args):
+            raise AssertionError('hot duplicate must not decode the stored payload')
+        monkeypatch.setattr(hot, '_decode', unexpected)
+        assert hot._append('evidence', evidence) == evidence
+        monkeypatch.undo()
+        for stream in hot._streams:
+            assert tuple(getattr(hot, stream)) == tuple(getattr(cold, stream))
+            assert hot._prefix_digest(stream, hot._counts[stream]) == cold._prefix_digest(stream, cold._counts[stream])
+
+
+def test_hot_cache_budget_eviction_oversize_and_close(tmp_path):
+    h = history.SQLiteCoverageHistory(tmp_path, run_id='run', hot_cache_bytes=4096)
+    records = [h.record_evidence(entity_ids=('site',), measurement='x', dependency_key={'i': i}, values={'x': 'a'*100}, status='measured') for i in range(20)]
+    assert h._payload_cache.bytes_used <= 3072
+    assert h._reference_cache.bytes_used <= 1024
+    assert h._payload_cache.get(records[0].id) is None
+    large = h.record_evidence(entity_ids=('site',), measurement='large', dependency_key={}, values={'x': 'a'*5000}, status='measured')
+    assert h._payload_cache.get(large.id) is None
+    assert h._append('evidence', records[0]) == records[0]
+    h.close()
+    assert h._payload_cache.bytes_used == h._reference_cache.bytes_used == 0
+
+
+def test_hot_cache_collision_wrong_stream_and_external_corruption(tmp_path):
+    from dataclasses import replace
+    h = history.SQLiteCoverageHistory(tmp_path, run_id='run')
+    e = h.record_evidence(entity_ids=('site',), measurement='x', dependency_key={}, values={'x': 1}, status='measured')
+    forged = replace(e, values={'x': 2})
+    object.__setattr__(forged, 'id', e.id)
+    with pytest.raises(ValueError, match='collision'):
+        h._append('evidence', forged)
+    with pytest.raises(ValueError, match='reference'):
+        h.emit(stage_id='strict', kind='bad', entity_ids=('site',), parent_event_ids=(e.id,))
+    h.checkpoint()
+    with sqlite3.connect(h.database_path) as db:
+        db.execute('UPDATE records SET payload=? WHERE id=?', (zlib.compress(b'{}'), e.id))
+    with pytest.raises(ValueError, match='corrupt'):
+        h._append('evidence', e)
+    h.close()
+    with pytest.raises(ValueError, match='corrupt'):
+        history.SQLiteCoverageHistory(tmp_path, run_id='run')
+
+
+def test_hot_cache_rollback_and_reload_are_cold(tmp_path):
+    h = history.SQLiteCoverageHistory(tmp_path, run_id='run')
+    e = h.record_evidence(entity_ids=('site',), measurement='x', dependency_key={}, values={'x': 1}, status='measured')
+    h.rollback()
+    assert h._payload_cache.bytes_used == h._reference_cache.bytes_used == 0
+    assert len(h.evidence) == 0
+    assert h._append('evidence', e) == e
+    h.checkpoint()
+    h._reload()
+    assert h._payload_cache.bytes_used == h._reference_cache.bytes_used == 0
+    assert len(h.evidence) == 1
+    h.close()
+
+
+def test_hot_references_skip_sql_but_cold_reload_revalidates(tmp_path):
+    with history.SQLiteCoverageHistory(tmp_path, run_id='run') as h:
+        parent = h.emit(stage_id='strict', kind='generated', entity_ids=('site',))
+        statements = []
+        h._db.set_trace_callback(statements.append)
+        h.emit(stage_id='strict', kind='child', entity_ids=('site',), parent_event_ids=(parent.id,))
+        assert not any('SELECT stream,position' in sql for sql in statements)
+        h.checkpoint()
+        statements.clear()
+        h._reload()
+        assert any('SELECT stream,position' in sql for sql in statements)
+        assert h._reference_cache.bytes_used == 0
+        assert h._db.execute('PRAGMA synchronous').fetchone()[0] == 2
+        assert h._db.execute('PRAGMA cache_size').fetchone()[0] == -8192
+        assert h.batch_size == 1000
+
+
+def test_byte_lru_refreshes_recency_and_bypasses_large_entries():
+    cache = history._ByteLRU(1100)
+    cache.put('a', ('v', 1))
+    cache.put('b', ('v', 2))
+    assert cache.get('a') == ('v', 1)
+    cache.put('c', ('v', 3))
+    assert cache.get('b') is None
+    assert cache.get('a') == ('v', 1)
+    cache.put('large', ('a'*2000, 1))
+    assert cache.get('large') is None
+    assert cache.bytes_used <= cache.budget
+
+
+def test_direct_sql_and_rollback_invalidate_hot_payloads(tmp_path):
+    with history.SQLiteCoverageHistory(tmp_path, run_id='run') as h:
+        e = h.record_evidence(entity_ids=('site',), measurement='x', dependency_key={}, values={}, status='measured')
+        h._db.rollback()
+        assert h._append('evidence', e) == e
+        assert len(h.evidence) == 1
+        h._db.execute('UPDATE records SET payload=? WHERE id=?', (zlib.compress(b'{}'), e.id))
+        with pytest.raises(ValueError, match='corrupt'):
+            h._append('evidence', e)
+        assert h._payload_cache.bytes_used == h._reference_cache.bytes_used == 0
+        h.rollback()
+
+
+@pytest.mark.parametrize('budget', [-1, True, 1.5])
+def test_hot_cache_budget_requires_nonnegative_integer(tmp_path, budget):
+    with pytest.raises(ValueError, match='hot_cache_bytes'):
+        history.SQLiteCoverageHistory(tmp_path, run_id='run', hot_cache_bytes=budget)
+
+
+def test_checkpoint_does_not_mask_direct_sql_changes(tmp_path):
+    with history.SQLiteCoverageHistory(tmp_path, run_id='run') as h:
+        e = h.record_evidence(entity_ids=('site',), measurement='x', dependency_key={}, values={}, status='measured')
+        h._db.execute('UPDATE records SET payload=? WHERE id=?', (zlib.compress(b'{}'), e.id))
+        h.checkpoint()
+        with pytest.raises(ValueError, match='corrupt'):
+            h._append('evidence', e)
