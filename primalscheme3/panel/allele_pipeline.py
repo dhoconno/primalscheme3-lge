@@ -73,9 +73,7 @@ def _gap_report(catalog, result):
                 "coverage_fraction": coverage.fraction,
                 "goal": result.coverage.goal,
                 "generated_sites": len(sites),
-                "eligible_sites": sum(
-                    s.id in eligible for s in sites
-                ),
+                "eligible_sites": sum(s.id in eligible for s in sites),
                 "families": len(families),
                 "explored_configurations": len(configs),
                 "diagnostic_categories": causes,
@@ -108,6 +106,7 @@ def run_allele_pipeline(
     output_dir = Path(output_dir)
     history = None
     timings = {}
+    origin_discovery = None
     scientific = {"selectionAlgorithm": "allele-coverage"}
     options = AlleleOptions.from_config(config)
     try:
@@ -118,17 +117,49 @@ def run_allele_pipeline(
             profiles = {
                 options.candidate_profiles: profiles[options.candidate_profiles]
             }
-        logger.info(
-            "Discovering concrete primer variants with complete profile membership"
-        )
-        catalog = build_variant_catalog(
-            msa_dict,
-            config,
-            profiles=profiles,
-            history=history,
-            length_mode=options.discovery_length_mode,
-        )
+        if options.reuse_discovery:
+            from .allele_catalog_cache import (
+                load_discovery_cache,
+                materialize_cache_reuse,
+            )
+
+            logger.info(
+                "Validating and reusing discovery catalog and immutable origin history"
+            )
+            reuse = load_discovery_cache(
+                options.reuse_discovery,
+                targets=variant_targets(msa_dict),
+                config=config,
+                profiles=profiles,
+            )
+            materialize_cache_reuse(reuse, output_dir, history=history)
+            catalog = reuse.catalog
+            origin_discovery = {"path": "origin-discovery/manifest.json"}
+            config.discovery_workers_by_msa = {
+                str(t.source_msa_index): 0 for t in catalog.targets
+            }
+            config.discovery_workers_by_target_profile = {
+                t.id: {p: 0 for p in profiles} for t in catalog.targets
+            }
+            config_dict["discovery_reused"] = True
+        else:
+            logger.info(
+                "Discovering concrete primer variants with complete profile membership"
+            )
+            catalog = build_variant_catalog(
+                msa_dict,
+                config,
+                profiles=profiles,
+                history=history,
+                length_mode=options.discovery_length_mode,
+            )
+            config_dict["discovery_reused"] = False
         timings["discovery_seconds"] = monotonic() - start
+        # Discovery is expensive and scientifically useful even when a later
+        # selector or publication fails. Keep its complete catalog independently.
+        with gzip.open(output_dir / "discovery-catalog.json.gz", "wt") as handle:
+            json.dump(catalog.to_dict(), handle, sort_keys=True, separators=(",", ":"))
+        history.checkpoint()
         for name in (
             "discovery_workers_by_msa",
             "discovery_workers_by_target_profile",
@@ -137,6 +168,8 @@ def run_allele_pipeline(
         ):
             if hasattr(config, name):
                 config_dict[name] = getattr(config, name)
+        if origin_discovery is not None:
+            config_dict["discovery_core_count"] = 0
         authoritative = _authoritative_targets(output_dir, input_records)
         references = _export_references(catalog, msa_dict)
         profile = AlleleConstraintProfile.from_config(
@@ -324,6 +357,8 @@ def run_allele_pipeline(
                 "projection": "ungapped-first-reference-coordinates",
             },
         }
+        if origin_discovery is not None:
+            optimizer["history"]["originDiscovery"] = origin_discovery
         _write(output_dir / "panel-optimizer.json", optimizer)
         config_dict.update(
             output=".",

@@ -570,6 +570,14 @@ def panel_create(
             rich_help_panel="Allele science",
         ),
     ] = None,
+    reuse_discovery: Annotated[
+        pathlib.Path | None,
+        typer.Option(
+            exists=True, file_okay=False,
+            help="Reuse a verified panel-cache artifact with identical discovery biology; copy all origin history into this output",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
     variant_selection: Annotated[
         str | None,
         typer.Option(
@@ -1113,6 +1121,22 @@ def panel_audit(
     typer.echo(str(output / "validation.json"))
     if not result["valid"]:
         raise typer.Exit(1)
+
+
+@app.command("panel-cache")
+def panel_cache(
+    bundle: Annotated[pathlib.Path, typer.Option(help="Completed allele panel whose discovery origins should be preserved")],
+    output: Annotated[pathlib.Path, typer.Option(help="New portable discovery cache directory outside the bundle")],
+):
+    """Export verified discovery for repeated selector experiments without regeneration."""
+    from primalscheme3.panel.allele_catalog_cache import export_panel_discovery_cache
+
+    try:
+        export_panel_discovery_cache(bundle, output, argv=list(sys.argv))
+    except (Exception, KeyboardInterrupt) as error:
+        typer.echo(str(error), err=True)
+        raise typer.Exit(1) from error
+    typer.echo(str(output / "manifest.json"))
 
 
 if __name__ == "__main__":

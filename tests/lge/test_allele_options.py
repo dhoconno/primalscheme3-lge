@@ -388,3 +388,54 @@ def test_legitimate_internal_requests_and_worker_metadata_preserve_complete_pres
     )
     # Execution counts are recomputed, not trusted from caller metadata.
     assert restored.discovery_workers_by_target_profile == {}
+
+
+def test_reuse_discovery_is_explicit_roundtripped_and_allele_only(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    result, run = invoke(tmp_path, ["--reuse-discovery", str(cache)])
+    assert result.exit_code == 0, result.output
+    passed = run.call_args.kwargs
+    assert options().from_config(passed["config"]).reuse_discovery == str(cache)
+    config = Config(**kwargs(reuse_discovery=cache))
+    assert options().from_config(config).reuse_discovery == str(cache)
+    assert Config(**config.to_dict()).to_dict() == config.to_dict()
+    result = CliRunner().invoke(
+        app,
+        [
+            "panel-create",
+            "--msa",
+            str(tmp_path / "input.fasta"),
+            "--output",
+            str(tmp_path / "legacy"),
+            "--reuse-discovery",
+            str(cache),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "require --selection-algorithm allele-coverage" in result.output
+
+
+@pytest.mark.parametrize("value", ["", 42, False])
+def test_reuse_discovery_rejects_invalid_paths(value):
+    with pytest.raises(ValueError, match="reuse_discovery"):
+        options()(reuse_discovery=value)
+
+
+def test_panel_cache_command_passes_paths_and_failure_exit(tmp_path):
+    source, output = tmp_path / "source", tmp_path / "cache"
+    with patch(
+        "primalscheme3.panel.allele_catalog_cache.export_panel_discovery_cache"
+    ) as export:
+        result = CliRunner().invoke(
+            app, ["panel-cache", "--bundle", str(source), "--output", str(output)]
+        )
+        assert result.exit_code == 0, result.output
+        assert export.call_args.args == (source, output)
+        assert "argv" in export.call_args.kwargs
+        export.side_effect = ValueError("invalid discovery origin")
+        result = CliRunner().invoke(
+            app, ["panel-cache", "--bundle", str(source), "--output", str(output)]
+        )
+        assert result.exit_code == 1
+        assert "invalid discovery origin" in result.output

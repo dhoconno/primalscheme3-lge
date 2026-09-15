@@ -23,6 +23,7 @@ NEW_OPTION_NAMES = frozenset(
     (
         "preset",
         "candidate_profiles",
+        "reuse_discovery",
         "variant_selection",
         "allele_weighting",
         "discovery_length_mode",
@@ -59,6 +60,7 @@ def _plain(value):
 class AlleleOptions:
     preset: str = PRESET
     candidate_profiles: str = "union"
+    reuse_discovery: str | None = None
     variant_selection: str = "subsets"
     allele_weighting: str = "distinct-observed"
     discovery_length_mode: str = "first-compatible"
@@ -101,6 +103,12 @@ class AlleleOptions:
     requested_options_json: str = "{}"
 
     def __post_init__(self):
+        if self.reuse_discovery is not None:
+            if (
+                not isinstance(self.reuse_discovery, str)
+                or not self.reuse_discovery.strip()
+            ):
+                raise ValueError("reuse_discovery must be a nonempty directory path")
         choices = {
             "preset": (PRESET,),
             "candidate_profiles": ("union", "normal", "high-gc"),
