@@ -19,6 +19,7 @@ import subprocess
 import sys
 import time
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -310,10 +311,29 @@ def expand_argv(
 
 def validate_tool_identity(entry: dict[str, Any], probe: dict[str, Any]) -> dict[str, str]:
     expected = entry.get("expectedToolIdentity")
-    if not expected:
-        raise ValueError(f"{entry['id']} requires expectedToolIdentity")
+    required_expected = {"name", "version", "gitCommit"}
+    if not isinstance(expected, dict) or not required_expected.issubset(expected):
+        raise ValueError(
+            f"{entry['id']} expectedToolIdentity requires name, version, and gitCommit"
+        )
     tool = probe["tool"]
     tool_name = tool if isinstance(tool, str) else tool["name"]
+    source = probe["source"]
+    runtime = probe["runtime"]
+    for key in ("gitCommit", "sourceDigest"):
+        if not isinstance(source.get(key), str) or not source[key]:
+            raise ValueError(f"{entry['id']} measured source requires nonempty {key}")
+    if not isinstance(runtime.get("pythonExecutable"), str) or not runtime["pythonExecutable"]:
+        raise ValueError(f"{entry['id']} measured runtime requires pythonExecutable")
+    kernel = runtime.get("kernel")
+    if not isinstance(kernel, dict) or any(not kernel.get(key) for key in ("system", "release", "version")):
+        raise ValueError(f"{entry['id']} measured runtime requires complete kernel identity")
+    dependencies = runtime.get("declaredRuntimeDependencies")
+    if not isinstance(dependencies, list) or not dependencies or any(
+        not isinstance(item, dict) or not item.get("distribution") or not item.get("version")
+        for item in dependencies
+    ):
+        raise ValueError(f"{entry['id']} measured runtime requires dependency identities")
     observed = {
         "name": tool_name,
         "version": probe["toolVersion"],
@@ -331,6 +351,72 @@ def validate_tool_identity(entry: dict[str, Any], probe: dict[str, Any]) -> dict
                 f"observed {actual!r}"
             )
     return {"name": observed["name"], "version": observed["version"]}
+
+
+def option_values_match(argv_value: str, resolved_value: Any) -> bool:
+    if isinstance(resolved_value, bool):
+        return argv_value.lower() == str(resolved_value).lower()
+    if isinstance(resolved_value, int | float):
+        try:
+            return Decimal(argv_value) == Decimal(str(resolved_value))
+        except InvalidOperation:
+            return False
+    return argv_value == str(resolved_value)
+
+
+def validate_option_contract(
+    entry: dict[str, Any], argv: list[str], measured_tool_version: str
+) -> None:
+    contract = entry.get("optionContract")
+    if not isinstance(contract, dict) or contract.get("schemaVersion") != (
+        "allele-coverage-resolved-options/v1"
+    ):
+        raise ValueError(f"{entry['id']} requires the resolved-options/v1 contract")
+    if contract.get("toolVersion") != measured_tool_version:
+        raise ValueError(f"{entry['id']} option contract toolVersion mismatch")
+    required = contract.get("requiredResolvedOptionKeys")
+    option_map = contract.get("argvOptionMap")
+    if not isinstance(required, list) or not required:
+        raise ValueError(f"{entry['id']} option contract requires resolved keys")
+    if not isinstance(option_map, dict) or not option_map:
+        raise ValueError(f"{entry['id']} option contract requires argvOptionMap")
+    resolved = entry["resolvedOptions"]
+    missing = [key for key in required if key not in resolved]
+    if missing:
+        raise ValueError(f"{entry['id']} missing required resolved options: {missing}")
+    for flag, key in option_map.items():
+        if key not in required:
+            raise ValueError(f"{entry['id']} argv mapping uses undeclared option {key}")
+        positions = [index for index, value in enumerate(argv) if value == flag]
+        if len(positions) != 1 or positions[0] + 1 >= len(argv):
+            raise ValueError(f"{entry['id']} requires exactly one {flag} value")
+        argv_value = argv[positions[0] + 1]
+        if not option_values_match(argv_value, resolved[key]):
+            raise ValueError(
+                f"{entry['id']} argv mismatch for {key}: {argv_value!r} != {resolved[key]!r}"
+            )
+
+
+def validate_actual_resolved_options(
+    entry: dict[str, Any], run_dir: Path, output: Path
+) -> dict[str, Any] | None:
+    declaration = entry.get("actualResolvedOptions")
+    if declaration is None:
+        return None
+    path = run_dir / "scientific-output" / safe_relative(declaration["path"])
+    payload: Any = json.loads(path.read_text())
+    for key in declaration.get("jsonPath", []):
+        payload = payload[key]
+    if not isinstance(payload, dict):
+        raise ValueError(f"{entry['id']} actual resolved options are not an object")
+    required = entry["optionContract"]["requiredResolvedOptionKeys"]
+    for key in required:
+        if key not in payload or payload[key] != entry["resolvedOptions"][key]:
+            raise ValueError(
+                f"{entry['id']} actual resolved option mismatch for {key}: "
+                f"{payload.get(key)!r} != {entry['resolvedOptions'][key]!r}"
+            )
+    return {**descriptor(path, relative_to=output), "jsonPath": declaration.get("jsonPath", [])}
 
 
 def run_entry(
@@ -355,6 +441,7 @@ def run_entry(
     probe_payload: dict[str, Any] = {}
     executable_artifact: dict[str, Any] | None = None
     tool_identity: dict[str, str] | None = None
+    actual_options_artifact: dict[str, Any] | None = None
     status = "launch-error"
     error = ""
     try:
@@ -370,14 +457,34 @@ def run_entry(
         if missing:
             raise ValueError(f"identity probe missing fields: {missing}")
         tool_identity = validate_tool_identity(entry, probe_payload)
+        validate_option_contract(entry, argv, probe_payload["toolVersion"])
         completed = subprocess.run(argv, capture_output=True, text=True, check=False)
         status = "success" if completed.returncode == 0 else "failed"
         stdout_path.write_text(completed.stdout)
         stderr_path.write_text(completed.stderr)
+        if completed.returncode == 0:
+            actual_options_artifact = validate_actual_resolved_options(
+                entry, run_dir, output
+            )
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}\n"
-        stdout_path.write_text("")
-        stderr_path.write_text(error)
+        if completed is None:
+            stdout_path.write_text("")
+            stderr_path.write_text(error)
+        else:
+            status = "output-validation-error"
+            stdout_path.write_text(completed.stdout)
+            stderr_path.write_text(completed.stderr + error)
+            declaration = entry.get("actualResolvedOptions")
+            if declaration:
+                actual_path = (
+                    run_dir / "scientific-output" / safe_relative(declaration["path"])
+                )
+                if actual_path.is_file():
+                    actual_options_artifact = {
+                        **descriptor(actual_path, relative_to=output),
+                        "jsonPath": declaration.get("jsonPath", []),
+                    }
     elapsed = time.perf_counter() - started
     output_artifacts = [
         descriptor(stdout_path, relative_to=output),
@@ -411,6 +518,7 @@ def run_entry(
         "executedToolArtifact": (
             None if executable_artifact is None else {**executable_artifact, "role": "executable"}
         ),
+        "actualResolvedOptionsArtifact": actual_options_artifact,
         "harnessIdentity": {"source": source_identity(), "runtime": runtime_identity()},
         "exitStatus": None if completed is None else completed.returncode,
         "wallTimeSeconds": elapsed,
@@ -418,6 +526,8 @@ def run_entry(
         "stdoutPath": str(stdout_path.relative_to(output)),
     }
     write_json(run_dir / "receipt.json", receipt)
+    if status == "output-validation-error":
+        return 1
     return 1 if completed is None else completed.returncode
 
 

@@ -279,6 +279,43 @@ interface (the executable path can instead be supplied by `--native-executable`)
     "optimizerRepairRounds": 2, "optimizerTimeLimitSeconds": 120,
     "subsetBeamWidth": 16, "subsetExpansionLimit": 256, "exchangeWidth": 2,
     "salvage": "off", "primaryTier": "strict"
+  },
+  "optionContract": {
+    "schemaVersion": "allele-coverage-resolved-options/v1",
+    "toolVersion": "3.3.0+lge.4",
+    "requiredResolvedOptionKeys": [
+      "mode", "ampliconSize", "ampliconSizeMin", "ampliconSizeMax",
+      "poolCount", "minimumBaseFrequency", "mapping", "coreCount",
+      "terminalGapPolicy", "dimerScore", "selectionAlgorithm",
+      "candidateProfiles", "coverageMetric", "coverageTarget",
+      "alleleWeighting", "specificityTerminalK", "misprimingProductSize",
+      "optimizerSeed", "optimizerStarts", "optimizerRepairRounds",
+      "optimizerTimeLimitSeconds", "subsetBeamWidth", "subsetExpansionLimit",
+      "exchangeWidth", "salvage", "primaryTier"
+    ],
+    "argvOptionMap": {
+      "--mode": "mode", "--amplicon-size": "ampliconSize",
+      "--amplicon-size-min": "ampliconSizeMin",
+      "--amplicon-size-max": "ampliconSizeMax", "--n-pools": "poolCount",
+      "--min-base-freq": "minimumBaseFrequency", "--mapping": "mapping",
+      "--ncores": "coreCount", "--terminal-gap-policy": "terminalGapPolicy",
+      "--dimer-score": "dimerScore", "--selection-algorithm": "selectionAlgorithm",
+      "--candidate-profiles": "candidateProfiles", "--coverage-metric": "coverageMetric",
+      "--coverage-target": "coverageTarget", "--allele-weighting": "alleleWeighting",
+      "--specificity-terminal-k": "specificityTerminalK",
+      "--mispriming-product-size": "misprimingProductSize",
+      "--optimizer-seed": "optimizerSeed", "--optimizer-starts": "optimizerStarts",
+      "--optimizer-repair-rounds": "optimizerRepairRounds",
+      "--optimizer-time-limit": "optimizerTimeLimitSeconds",
+      "--subset-beam-width": "subsetBeamWidth",
+      "--subset-expansion-limit": "subsetExpansionLimit",
+      "--exchange-width": "exchangeWidth", "--salvage": "salvage",
+      "--primary-tier": "primaryTier"
+    }
+  },
+  "actualResolvedOptions": {
+    "path": "config.json",
+    "jsonPath": ["panel_optimizer", "options"]
   }
 }
 ```
@@ -287,7 +324,13 @@ interface (the executable path can instead be supplied by `--native-executable`)
 manifest order. `{output}` expands to a new path inside the run receipt directory.
 The identity probe must return `tool`, `toolVersion`, `source`, and `runtime`; the
 runner compares the measured name, version, and source commit with
-`expectedToolIdentity` before scientific execution.
+`expectedToolIdentity` before scientific execution. Measured source identity must
+include a nonempty Git commit and source digest. Measured runtime identity must
+include the interpreter, complete kernel identity, and at least one versioned
+runtime dependency. The version-bound `optionContract` requires every listed key
+and compares each mapped argv value with `resolvedOptions` before launch. When
+`actualResolvedOptions` is present, the runner hashes the native config and verifies
+its resolved values after execution; any mismatch makes the run fail publication.
 
 Each executed matrix row writes this minimum receipt shape, with additional schema,
 workflow, shell-command and stdout fields allowed:

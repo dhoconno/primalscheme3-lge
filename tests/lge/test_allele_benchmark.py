@@ -69,8 +69,10 @@ def _matrix(root: Path, *, fail: bool = False, executable: str | None = None) ->
     probe = (
         "import json; print(json.dumps({"
         "'tool': 'fixture-tool', 'toolVersion':'1.2.3',"
-        "'source': {'gitCommit':'abc123','gitDirty':False},"
-        "'runtime': {'pythonVersion':'measured-runtime'}}))"
+        "'source': {'gitCommit':'abc123','gitDirty':False,'sourceDigest':'digest123'},"
+        "'runtime': {'pythonVersion':'measured-runtime',"
+        "'pythonExecutable':'/measured/python','kernel':{'system':'TestOS','release':'1','version':'v1'},"
+        "'declaredRuntimeDependencies':[{'distribution':'fixture-dep','version':'4.5'}]}}))"
     )
     for name in ("historical-independent", "historical-combined"):
         _saved_control(root, name)
@@ -102,11 +104,28 @@ def _matrix(root: Path, *, fail: bool = False, executable: str | None = None) ->
                     "version": "1.2.3",
                     "gitCommit": "abc123",
                 },
-                "argv": ["-c", code, str(marker)],
+                "argv": [
+                    "-c",
+                    code,
+                    str(marker),
+                    "--selection-algorithm",
+                    "coverage",
+                    "--n-pools",
+                    "2",
+                ],
                 "optionsFullyResolved": True,
                 "resolvedOptions": {
                     "selectionAlgorithm": "coverage",
                     "poolCount": 2,
+                },
+                "optionContract": {
+                    "schemaVersion": "allele-coverage-resolved-options/v1",
+                    "toolVersion": "1.2.3",
+                    "requiredResolvedOptionKeys": ["selectionAlgorithm", "poolCount"],
+                    "argvOptionMap": {
+                        "--selection-algorithm": "selectionAlgorithm",
+                        "--n-pools": "poolCount"
+                    }
                 },
             },
         ],
@@ -215,8 +234,8 @@ def test_failed_subprocess_records_status_and_stderr(tmp_path):
     assert len(consumed) == 2
     assert all(item["path"].startswith("snapshot/") for item in consumed)
     assert receipt["toolIdentity"] == {"name": "fixture-tool", "version": "1.2.3"}
-    assert receipt["sourceIdentity"] == {"gitCommit": "abc123", "gitDirty": False}
-    assert receipt["runtimeIdentity"] == {"pythonVersion": "measured-runtime"}
+    assert receipt["sourceIdentity"]["sourceDigest"] == "digest123"
+    assert receipt["runtimeIdentity"]["pythonExecutable"] == "/measured/python"
     assert receipt["harnessIdentity"]["source"]
 
 
@@ -258,7 +277,10 @@ def test_msa_placeholder_expands_to_repeated_native_options(tmp_path):
     matrix_path = _matrix(root)
     matrix = json.loads(matrix_path.read_text())
     native = next(item for item in matrix["comparisons"] if item["kind"] == "native-execution")
-    native["argv"] = ["panel-create", "{msa_args}", "--output", "{output}"]
+    native["argv"] = [
+        "panel-create", "{msa_args}", "--output", "{output}",
+        "--selection-algorithm", "coverage", "--n-pools", "2",
+    ]
     matrix_path.write_text(json.dumps(matrix))
     output = tmp_path / "result"
 
@@ -287,3 +309,86 @@ def test_msa_placeholder_expands_to_repeated_native_options(tmp_path):
     assert len(msa_paths) == 2
     assert all("/snapshot/" in path for path in msa_paths)
     assert completed.returncode != 0  # Python rejects the fake panel-create command.
+
+
+def test_missing_required_resolved_option_is_rejected_before_execution(tmp_path):
+    root = tmp_path / "fixtures"
+    _fixture(root)
+    matrix_path = _matrix(root)
+    matrix = json.loads(matrix_path.read_text())
+    native = next(item for item in matrix["comparisons"] if item["kind"] == "native-execution")
+    del native["resolvedOptions"]["poolCount"]
+    matrix_path.write_text(json.dumps(matrix))
+    output = tmp_path / "result"
+
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "--fixture-root", str(root),
+         "--native-executable", sys.executable, "--output", str(output),
+         "--matrix", str(matrix_path)],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+
+    assert completed.returncode != 0
+    assert not (root / "executed").exists()
+    receipt = json.loads((output / "runs" / "existing-lge.3" / "receipt.json").read_text())
+    assert "missing required resolved options" in (output / receipt["stderrPath"]).read_text()
+
+
+def test_resolved_option_value_must_match_scientific_argv(tmp_path):
+    root = tmp_path / "fixtures"
+    _fixture(root)
+    matrix_path = _matrix(root)
+    matrix = json.loads(matrix_path.read_text())
+    native = next(item for item in matrix["comparisons"] if item["kind"] == "native-execution")
+    native["resolvedOptions"]["poolCount"] = 3
+    matrix_path.write_text(json.dumps(matrix))
+    output = tmp_path / "result"
+
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "--fixture-root", str(root),
+         "--native-executable", sys.executable, "--output", str(output),
+         "--matrix", str(matrix_path)],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+
+    assert completed.returncode != 0
+    assert not (root / "executed").exists()
+    receipt = json.loads((output / "runs" / "existing-lge.3" / "receipt.json").read_text())
+    assert "argv mismatch" in (output / receipt["stderrPath"]).read_text()
+
+
+def test_actual_native_config_must_match_declared_resolved_options(tmp_path):
+    root = tmp_path / "fixtures"
+    _fixture(root)
+    matrix_path = _matrix(root)
+    matrix = json.loads(matrix_path.read_text())
+    native = next(item for item in matrix["comparisons"] if item["kind"] == "native-execution")
+    code = (
+        "import json,pathlib,sys; "
+        "p=pathlib.Path(sys.argv[sys.argv.index('--output')+1]); p.mkdir(); "
+        "(p/'config.json').write_text(json.dumps(dict(resolvedOptions="
+        "dict(selectionAlgorithm='coverage',poolCount=999))))"
+    )
+    native["argv"] = [
+        "-c", code, "--selection-algorithm", "coverage", "--n-pools", "2",
+        "--output", "{output}",
+    ]
+    native["actualResolvedOptions"] = {
+        "path": "config.json",
+        "jsonPath": ["resolvedOptions"],
+    }
+    matrix_path.write_text(json.dumps(matrix))
+    output = tmp_path / "result"
+
+    completed = subprocess.run(
+        [sys.executable, str(SCRIPT), "--fixture-root", str(root),
+         "--native-executable", sys.executable, "--output", str(output),
+         "--matrix", str(matrix_path)],
+        cwd=ROOT, text=True, capture_output=True, check=False,
+    )
+
+    assert completed.returncode != 0
+    receipt = json.loads((output / "runs" / "existing-lge.3" / "receipt.json").read_text())
+    assert receipt["status"] == "output-validation-error"
+    assert receipt["actualResolvedOptionsArtifact"]["path"].endswith("config.json")
+    assert "actual resolved option mismatch" in (output / receipt["stderrPath"]).read_text()
