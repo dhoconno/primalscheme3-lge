@@ -449,3 +449,111 @@ def test_rejected_candidate_retains_performed_measurements_and_unperformed_check
     assert any(x.evidence_ids for x in assessments)
     measured = result.history.query(entity_id=configs[0].id)["evidence"]
     assert any(e.values.get("dimer_edges") for e in measured)
+
+
+@pytest.mark.parametrize("salvage", [False, True])
+def test_real_dimer_witness_ignores_safe_edges_with_one_expansion(salvage):
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from test_allele_validation import fixture, profile, dna
+    from primalscheme3.panel.allele_validation import (
+        AlleleCompatibilityOracle,
+        StagePolicy,
+    )
+    from primalscheme3.core.seq_functions import reverse_complement
+
+    a = api()
+    seq = dna(seed=0)
+    bad_seq = "GCGCGCGCGCGCGCGCGCGC"
+    cat, _, _ = fixture(
+        seq=seq, rows=(seq, seq[:180] + reverse_complement(bad_seq) + seq[200:])
+    )
+    family = cat.families[0]
+    bad = OligoSite(
+        cat.targets[0].id,
+        bad_seq,
+        "-",
+        180,
+        (180, 200),
+        accepting_profile_ids=("normal",),
+    )
+    family = replace(family, reverse_site_ids=family.reverse_site_ids + (bad.id,))
+    cat = replace(cat, sites=cat.sites + (bad,), families=(family,))
+    full = make_configuration(
+        cat, family.id, family.forward_site_ids, family.reverse_site_ids
+    )
+    good = make_configuration(
+        cat,
+        family.id,
+        family.forward_site_ids,
+        tuple(s for s in family.reverse_site_ids if s != bad.id),
+    )
+    ledger = ConfigurationLedger(cat.semantic_digest, (full,))
+    policy = (
+        StagePolicy(stage_id="salvage-1", active_cutoff=-1000)
+        if salvage
+        else StagePolicy()
+    )
+    oracle = AlleleCompatibilityOracle(cat, ledger, profile(), policy)
+    oracle.register(good)
+    assert not oracle.candidate_valid(full.id)
+    assert oracle.candidate_valid(good.id)
+    proposals = a._Proposals(
+        cat,
+        ledger,
+        oracle,
+        profile(),
+        policy,
+        a.AlleleSearchOptions(subset_expansion_limit=1),
+        CoverageHistory(run_id="actual-witness"),
+    )
+    search = SimpleNamespace(
+        tick=lambda: None, valid=oracle.candidate_valid, conflict=oracle.conflict
+    )
+    state = SimpleNamespace(assignments={}, items=lambda: ())
+    proposals.neighborhoods(search, state, 0, 0)
+    assert good.id in proposals.records
+
+
+@pytest.mark.parametrize("reason", ["amplicon-size", "no-useful-joint-support"])
+def test_failed_seed_sites_and_reason_survive_reload(tmp_path, reason):
+    from dataclasses import replace
+
+    a = api()
+    cat, _, profile = instance({"A": (1, 11)})
+    if reason == "amplicon-size":
+        profile = replace(profile, amplicon_size_max=5)
+    else:
+        sites = tuple(replace(s, sequence="C") for s in cat.sites)
+        old = cat.families[0]
+        fam = CandidateFamily(
+            old.target_id,
+            old.anchor_pair,
+            tuple(s.id for s in sites if s.strand == "+"),
+            tuple(s.id for s in sites if s.strand == "-"),
+        )
+        cat = replace(cat, sites=sites, families=(fam,))
+    history = CoverageHistory(tmp_path, run_id="failed-seeds")
+    result = a.search_allele_assignments(
+        cat,
+        profile,
+        history=history,
+        options=a.AlleleSearchOptions(starts=1, repair_rounds=0),
+    )
+    assert result.validation["valid"]
+    loaded = CoverageHistory(tmp_path, run_id="failed-seeds")
+    events = [e for e in loaded.events if e.kind == "seed-rejected"]
+    assert {e.changes["seed_mode"] for e in events} == {"full", "normal"}
+    family = cat.families[0]
+    for event in events:
+        assert event.changes["reason"] == reason
+        assert tuple(event.changes["forward_site_ids"]) == family.forward_site_ids
+        assert tuple(event.changes["reverse_site_ids"]) == family.reverse_site_ids
+        assert set(family.forward_site_ids + family.reverse_site_ids).issubset(
+            event.entity_ids
+        )
+        assert event.assessment_ids
+        assert (
+            loaded.last_complete_stage.dispositions[event.changes["attempt_id"]]
+            == "rejected-seed-construction"
+        )

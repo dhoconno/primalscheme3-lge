@@ -563,17 +563,57 @@ class _Proposals:
                 and self.catalog.site_by_id[sid].mapping_failure is None
             )
 
+        forward = eligible(family.forward_site_ids)
+        reverse = eligible(family.reverse_site_ids)
         try:
             config = make_configuration(
                 self.catalog,
                 family_id,
-                eligible(family.forward_site_ids),
-                eligible(family.reverse_site_ids),
+                forward,
+                reverse,
                 min_size=self.profile.amplicon_size_min,
                 max_size=self.profile.amplicon_size_max,
             )
-        except ConfigurationIneligible:
+        except ConfigurationIneligible as exc:
             self.work["ineligible_seeds"] += 1
+            context = {
+                "catalog_digest": self.catalog.semantic_digest,
+                "family_id": family_id,
+                "seed_mode": mode,
+                "forward_site_ids": forward,
+                "reverse_site_ids": reverse,
+                "profile": self.profile.to_dict(),
+                "stage_policy": asdict(self.policy),
+            }
+            attempt = semantic_id("seed-attempt/v1", context)
+            entities = (attempt, family_id, *forward, *reverse)
+            evidence = self.history.record_evidence(
+                entity_ids=entities,
+                measurement="seed-construction",
+                dependency_key=context,
+                values=context | {"reason": exc.reason},
+                status="evaluated",
+            )
+            assessment = self.history.assess(
+                stage_id=self.policy.stage_id,
+                entity_ids=entities,
+                pool=None,
+                context_digest=attempt,
+                profile_id="allele-panel-v1",
+                kernel_versions={},
+                thresholds=self.profile.to_dict() | asdict(self.policy),
+                check_name="seed-construction",
+                outcome="fail",
+                reason=exc.reason,
+                evidence_ids=(evidence.id,),
+            )
+            self.history.emit(
+                stage_id=self.policy.stage_id,
+                kind="seed-rejected",
+                entity_ids=entities,
+                assessment_ids=(assessment.id,),
+                changes=context | {"attempt_id": attempt, "reason": exc.reason},
+            )
             return
         self._register(config)
         self.seed_ids[mode].add(config.id)
@@ -697,6 +737,19 @@ class _Proposals:
             for report in diagnostics:
                 for key in ("dimer_edges", "rejected_products", "uncertainty_blocks"):
                     for witness in report.get(key, ()):
+                        if key == "dimer_edges":
+                            reasons = report.get("reasons", ())
+                            score = witness["score"]
+                            active = (
+                                "dimer-threshold" in reasons
+                                and self.policy.rejects(score)
+                            )
+                            exposure = (
+                                "salvage-exposure-budget" in reasons
+                                and score <= self.policy.strict_cutoff
+                            )
+                            if not (active or exposure):
+                                continue
                         ids = tuple(witness.get("site_ids", ()))
                         if ids:
                             witnesses.append(
@@ -769,11 +822,14 @@ def _finish_history(result, *, complete):
     stage = result.metadata["stage_policy"]["stage_id"]
     previous = history.last_complete_stage
     # A single checkpoint pass is intentional; never performed per family.
-    touched = {
-        entity
-        for event in history.iter_events(start=previous.events_count if previous else 0)
-        for entity in event.entity_ids
-    }
+    touched = set()
+    seed_context = set()
+    failed_attempts = set()
+    for event in history.iter_events(start=previous.events_count if previous else 0):
+        touched.update(event.entity_ids)
+        if event.kind == "seed-rejected":
+            seed_context.update(event.entity_ids)
+            failed_attempts.add(event.changes["attempt_id"])
     dispositions = {}
     validity = result.metadata["candidate_status"]
     for cid in touched:
@@ -790,6 +846,10 @@ def _finish_history(result, *, complete):
                 )
             )
         )
+    for entity in seed_context - set(validity) - selected:
+        dispositions[entity] = "evaluated-seed-context"
+    for attempt in failed_attempts:
+        dispositions[attempt] = "rejected-seed-construction"
     snapshot = history.complete_stage(
         stage_id=stage,
         dispositions=dispositions,
