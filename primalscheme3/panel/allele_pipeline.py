@@ -48,6 +48,7 @@ def _authoritative_targets(output_dir, input_records):
 
 def _gap_report(catalog, result):
     reports = []
+    eligible = set(catalog.selectable_site_ids)
     for target in catalog.targets:
         sites = [s for s in catalog.sites if s.target_id == target.id]
         families = [f for f in catalog.families if f.target_id == target.id]
@@ -56,7 +57,7 @@ def _gap_report(catalog, result):
         causes = []
         if coverage.fraction is None:
             causes.append("unavailable-observations")
-        if not any(s.id in catalog.selectable_site_ids for s in sites):
+        if not any(s.id in eligible for s in sites):
             causes.append("no-individually-eligible-binding-sites")
         elif not families:
             causes.append("no-valid-family-geometry")
@@ -73,7 +74,7 @@ def _gap_report(catalog, result):
                 "goal": result.coverage.goal,
                 "generated_sites": len(sites),
                 "eligible_sites": sum(
-                    s.id in catalog.selectable_site_ids for s in sites
+                    s.id in eligible for s in sites
                 ),
                 "families": len(families),
                 "explored_configurations": len(configs),
@@ -128,6 +129,14 @@ def run_allele_pipeline(
             length_mode=options.discovery_length_mode,
         )
         timings["discovery_seconds"] = monotonic() - start
+        for name in (
+            "discovery_workers_by_msa",
+            "discovery_workers_by_target_profile",
+            "discovery_core_count",
+            "discovery_backend",
+        ):
+            if hasattr(config, name):
+                config_dict[name] = getattr(config, name)
         authoritative = _authoritative_targets(output_dir, input_records)
         references = _export_references(catalog, msa_dict)
         profile = AlleleConstraintProfile.from_config(

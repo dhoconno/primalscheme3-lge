@@ -695,7 +695,7 @@ def panelcreate(
             workflow_started_at=started_at,
             invocation_state=invocation_state,
         )
-    except Exception as error:
+    except BaseException as error:
         output = pathlib.Path(output_dir).absolute()
         if (
             config.selection_algorithm in {"coverage", "allele-coverage"}

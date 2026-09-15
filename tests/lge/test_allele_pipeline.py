@@ -53,3 +53,37 @@ def test_empty_native_allele_workflow_has_portable_outputs_and_provenance(tmp_pa
     from primalscheme3.panel.allele_publication import audit_allele_stage
 
     assert audit_allele_stage(out / "stages/strict")["valid"]
+
+
+def test_cancelled_input_loading_writes_failure_provenance(tmp_path, monkeypatch):
+    import pytest
+    from primalscheme3.panel import panel_main
+
+    msa = tmp_path / "short.fasta"
+    msa.write_text(">short\n" + "A" * 30 + "\n")
+    out = tmp_path / "cancelled"
+    config = Config(
+        selection_algorithm="allele-coverage",
+        amplicon_size_min=150,
+        amplicon_size_max=250,
+        amplicon_size=200,
+        amplicon_size_metric=AmpliconSizeMetric.REFERENCE_SPAN,
+        ncores=1,
+    )
+
+    def cancel(**kwargs):
+        raise KeyboardInterrupt("cancel during input loading")
+
+    monkeypatch.setattr(panel_main, "PanelMSA", cancel)
+    with pytest.raises(KeyboardInterrupt):
+        panelcreate(
+            [msa],
+            out,
+            config,
+            None,
+            mode=PanelRunModes.EQUAL,
+            executed_argv=["primalscheme3", "panel-create"],
+        )
+    result = json.loads((out / "panel-provenance.json").read_text())
+    assert result["exitStatus"] != 0
+    assert result["inputs"][0]["storedMissing"] is False
