@@ -301,3 +301,70 @@ def test_export_preflight_failures_have_receipts_without_mutating_source(tmp_pat
     with pytest.raises(FileExistsError):
         export_panel_discovery_cache(panel, output, argv=["panel-cache"])
     assert (output / "cache-export-provenance.json").read_bytes() == before
+
+
+def test_cache_invalidates_changed_config_dna_table_dependency(tmp_path, monkeypatch):
+    from copy import deepcopy
+
+    from primalscheme3.panel import allele_catalog_cache as cache_api
+
+    targets, config, _ = fixture_panel(tmp_path / "panel")
+    cache = tmp_path / "cache"
+    cache_api.export_panel_discovery_cache(tmp_path / "panel", cache, argv=["cache"])
+    changed = deepcopy(cache_api.source_identity())
+    entry = next(
+        f for f in changed["files"] if f["path"] == "primalscheme3/core/config.py"
+    )
+    entry["sha256"] = "changed-DNA-interpretation-table"
+    monkeypatch.setattr(cache_api, "source_identity", lambda: changed)
+    with pytest.raises(ValueError, match="implementation or kernels"):
+        cache_api.load_discovery_cache(cache, targets=targets, config=config)
+
+
+@pytest.mark.parametrize("identity", ["source", "runtime"])
+def test_export_identity_drift_fails_with_exact_retained_output_receipt(
+    tmp_path, monkeypatch, identity
+):
+    import hashlib
+    from copy import deepcopy
+
+    from primalscheme3.panel import allele_catalog_cache as cache_api
+
+    targets, config, _ = fixture_panel(tmp_path / "panel")
+    original = getattr(cache_api, identity + "_identity")()
+    changed = deepcopy(original)
+    changed["sourceDigest" if identity == "source" else "pythonVersion"] = (
+        "changed-during-export"
+    )
+    calls = 0
+
+    def drifting_identity():
+        nonlocal calls
+        calls += 1
+        return original if calls == 1 else changed
+
+    monkeypatch.setattr(cache_api, identity + "_identity", drifting_identity)
+    cache = tmp_path / "cache"
+    with pytest.raises(ValueError, match="identity changed"):
+        cache_api.export_panel_discovery_cache(
+            tmp_path / "panel", cache, argv=["cache"]
+        )
+    receipt = json.loads((cache / "cache-export-provenance.json").read_text())
+    assert receipt["status"] == "failure" and receipt["exitStatus"] == 1
+    assert receipt[identity + "ChangedDuringRun"] is True
+    assert receipt[identity] == original and receipt[identity + "AtEnd"] == changed
+    manifest = json.loads((cache / "manifest.json").read_text())
+    assert manifest["export"]["source"] == receipt["source"]
+    assert manifest["export"]["runtime"] == receipt["runtime"]
+    assert manifest["export"]["exitStatus"] == 1
+    for name, descriptor in receipt["outputs"].items():
+        payload = (cache / name).read_bytes()
+        assert descriptor == {
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+    # Even a contradictory successful status cannot hide declared identity drift.
+    receipt.update(status="success", exitStatus=0)
+    (cache / "cache-export-provenance.json").write_text(canonical_json(receipt))
+    with pytest.raises(ValueError, match="complete successfully"):
+        cache_api.load_discovery_cache(cache, targets=targets, config=config)

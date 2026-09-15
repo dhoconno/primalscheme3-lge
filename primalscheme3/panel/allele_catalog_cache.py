@@ -37,6 +37,7 @@ SCHEMA = "primalscheme3.discovery-cache/v1"
 _DISCOVERY_FILES = tuple(
     "primalscheme3/" + name
     for name in (
+        "core/config.py",
         "core/digestion.py",
         "core/variant_thermo.py",
         "core/thermo.py",
@@ -196,7 +197,9 @@ def _target_signature(targets):
     return [asdict(t) for t in sorted(targets, key=lambda t: t.source_msa_index)]
 
 
-def _export_panel_discovery_cache(panel_dir, cache_dir, *, argv):
+def _export_panel_discovery_cache(
+    panel_dir, cache_dir, *, argv, executed_source, executed_runtime
+):
     """Export a closed successful native panel, never a partial/in-flight run."""
     started = monotonic()
     panel_dir, cache_dir = Path(panel_dir).resolve(), Path(cache_dir).resolve()
@@ -302,8 +305,8 @@ def _export_panel_discovery_cache(panel_dir, cache_dir, *, argv):
                 )["sha256"],
                 "wallSeconds": monotonic() - started,
                 "exitStatus": 0,
-                "source": source_identity(),
-                "runtime": runtime_identity(),
+                "source": executed_source,
+                "runtime": executed_runtime,
             },
         }
         # Verify copies against the original immutable receipt, including a race
@@ -348,14 +351,42 @@ def export_panel_discovery_cache(panel_dir, cache_dir, *, argv):
     )
     result, failure = None, None
     try:
-        result = _export_panel_discovery_cache(panel_dir, cache_dir, argv=argv)
+        result = _export_panel_discovery_cache(
+            panel_dir,
+            cache_dir,
+            argv=argv,
+            executed_source=executed_source,
+            executed_runtime=executed_runtime,
+        )
         return result
     except BaseException as error:
         failure = error
         raise
     finally:
+        end_source, end_runtime = source_identity(), runtime_identity()
+        source_changed = executed_source["sourceDigest"] != end_source["sourceDigest"]
+        runtime_changed = executed_runtime != end_runtime
+        drift_failure = failure is None and (source_changed or runtime_changed)
+        if drift_failure:
+            failure = ValueError(
+                "source or runtime identity changed during cache export"
+            )
+        stability = {
+            "sourceAtEnd": end_source,
+            "runtimeAtEnd": end_runtime,
+            "sourceChangedDuringRun": source_changed,
+            "runtimeChangedDuringRun": runtime_changed,
+        }
         cache_dir.mkdir(parents=True, exist_ok=True)
         receipt = cache_dir / "cache-export-provenance.json"
+        if result is not None:
+            result["export"].update(
+                stability,
+                status="success" if failure is None else "failure",
+                exitStatus=0 if failure is None else 1,
+                stderr="" if failure is None else str(failure),
+            )
+            _write(cache_dir / "manifest.json", result)
         if result is not None:
             # These copied payload descriptors were verified against the source
             # receipt by the exporter. Do not reread a multi-GB DB once more.
@@ -404,6 +435,7 @@ def export_panel_discovery_cache(panel_dir, cache_dir, *, argv):
                 },
                 "source": executed_source,
                 "runtime": executed_runtime,
+                **stability,
                 "inputs": inputs,
                 "outputs": outputs,
                 "outputDirectory": str(cache_dir),
@@ -414,6 +446,9 @@ def export_panel_discovery_cache(panel_dir, cache_dir, *, argv):
                 "selfHashPolicy": "cache-export-provenance.json excluded; manifest references it without a checksum to avoid a cycle",
             },
         )
+
+        if drift_failure:
+            raise failure
 
 
 def _project(catalog, names, database):
@@ -548,6 +583,8 @@ def load_discovery_cache(cache_dir, *, targets, config, profiles=None, indexes=N
     if (
         export_receipt.get("status") != "success"
         or export_receipt.get("exitStatus") != 0
+        or export_receipt.get("sourceChangedDuringRun") is not False
+        or export_receipt.get("runtimeChangedDuringRun") is not False
     ):
         raise ValueError("cache export did not complete successfully")
     _verify(cache_dir, "manifest.json", export_receipt["outputs"]["manifest.json"])
@@ -662,7 +699,12 @@ def materialize_cache_reuse(reuse, output_dir, *, history):
     for name, descriptor in reuse.manifest["artifacts"].items():
         _verify(destination, name, descriptor)
     receipt = _read(_local(destination, reuse.manifest["exportProvenancePath"]))
-    if receipt.get("status") != "success" or receipt.get("exitStatus") != 0:
+    if (
+        receipt.get("status") != "success"
+        or receipt.get("exitStatus") != 0
+        or receipt.get("sourceChangedDuringRun") is not False
+        or receipt.get("runtimeChangedDuringRun") is not False
+    ):
         raise ValueError("copied cache export receipt is invalid")
     _verify(destination, "manifest.json", receipt["outputs"]["manifest.json"])
     for evidence in reuse.derived_evidence:
