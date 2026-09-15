@@ -113,3 +113,18 @@ def test_touched_entities_require_fresh_dispositions(tmp_path,kind):
         h.complete_stage(stage_id='salvage',dispositions={},catalog_digest='c',ledger_digest='l',prior_snapshot_id=first.id)
     fresh = h.complete_stage(stage_id='salvage',dispositions={'site':'superseded'},catalog_digest='c',ledger_digest='l',prior_snapshot_id=first.id)
     assert fresh.dispositions['site'] == 'superseded'
+
+
+def test_latest_entity_event_index_survives_reload(tmp_path):
+    a = api()
+    h = a.CoverageHistory(tmp_path, run_id='indexed')
+    old = h.emit(stage_id='discovery', kind='generated', entity_ids=('parent', 'shared'))
+    latest = h.emit(stage_id='strict', kind='reconsidered', entity_ids=('parent',))
+    for i in range(20):
+        h.emit(stage_id='strict', kind='generated', entity_ids=(f'unrelated-{i}',))
+    assert h.latest_event('parent') == latest
+    assert h.latest_event('shared') == old
+    assert h.latest_event('absent') is None
+    loaded = a.CoverageHistory(tmp_path, run_id='indexed')
+    assert loaded.latest_event('parent') == latest
+    assert loaded.latest_event('shared') == old

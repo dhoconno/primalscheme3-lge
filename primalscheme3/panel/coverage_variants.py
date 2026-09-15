@@ -23,7 +23,8 @@ def _bounds(catalog, min_size, max_size):
     resolved = json.loads(catalog.resolved_config_json)
     minimum = resolved.get('amplicon_size_min', 1) if min_size is None else min_size
     maximum = resolved.get('amplicon_size_max') if max_size is None else max_size
-    if minimum < 1 or (maximum is not None and maximum < minimum):
+    if (type(minimum) is not int or minimum < 1
+            or (maximum is not None and (type(maximum) is not int or maximum < minimum))):
         raise ValueError('invalid amplicon size bounds')
     return minimum, maximum
 
@@ -86,7 +87,7 @@ class SubsetLimits:
     expansion_limit: int = 256
 
     def __post_init__(self):
-        if self.beam_width < 1 or self.expansion_limit < 1:
+        if any(type(value) is not int or value < 1 for value in (self.beam_width, self.expansion_limit)):
             raise ValueError('subset work limits must be positive')
 
 
@@ -97,6 +98,12 @@ class ProposalContext:
     min_size: int | None = None
     max_size: int | None = None
     profile_ids: tuple[str, ...] | None = None
+
+    def __post_init__(self):
+        if (any(value is not None and (type(value) is not int or value < 1)
+                for value in (self.min_size, self.max_size))
+                or (self.min_size is not None and self.max_size is not None and self.max_size < self.min_size)):
+            raise ValueError('invalid amplicon size bounds')
 
 
 @dataclass(frozen=True)
@@ -130,6 +137,7 @@ def propose_configurations(catalog, ledger, family_id, *, parent_ids=(), witness
     checkpoints. No powerset is constructed. Beam omissions are explicit and may
     be reconsidered in a later call with those configurations as parents.
     """
+    _bounds(catalog, context.min_size, context.max_size)
     if ledger.catalog_digest != catalog.semantic_digest:
         raise ValueError('ledger belongs to a different catalog')
     family = catalog.family_by_id[family_id]
@@ -183,7 +191,15 @@ def propose_configurations(catalog, ledger, family_id, *, parent_ids=(), witness
     seen = set()
     records, omitted, dispositions = [], [], {}
     existing = ledger.configuration_by_id
-    event_ids = {entity: event.id for event in history.events for entity in event.entity_ids} if history else {}
+    event_ids = {}
+
+    def event_id(entity_id):
+        if entity_id not in event_ids and history is not None:
+            previous = history.latest_event(entity_id)
+            if previous is not None:
+                event_ids[entity_id] = previous.id
+        return event_ids.get(entity_id)
+
     expanded = 0
     beam_used = 0
     while streams and expanded < limits.expansion_limit:
@@ -212,6 +228,17 @@ def propose_configurations(catalog, ledger, family_id, *, parent_ids=(), witness
             # An existing seed still supplies a neighborhood in this call.
             if beam_used < limits.beam_width:
                 streams.append((config.id, iter(neighbors(config)))); beam_used += 1
+                dispositions[config.id] = 'proposed'
+            else:
+                omitted.append(config.id)
+                dispositions[config.id] = 'not-explored/work-limit'
+                if history is not None:
+                    previous = event_id(config.id)
+                    event = history.emit(stage_id=stage, kind='configuration-not-explored',
+                        entity_ids=(config.id,), parent_event_ids=(previous,) if previous else (),
+                        changes={'reason': 'beam-limit', 'disposition': 'not-explored/work-limit',
+                                 'pool': context.pool, 'context_digest': context.context_digest})
+                    event_ids[config.id] = event.id
             continue
         records.append(config)
         before = configuration_coverage(catalog, parent) if parent else {}
@@ -227,7 +254,8 @@ def propose_configurations(catalog, ledger, family_id, *, parent_ids=(), witness
         if history is not None:
             old = set(parent.forward_site_ids+parent.reverse_site_ids) if parent else set()
             new = set(f+r)
-            parent_events = (event_ids[parent.id],) if parent and parent.id in event_ids else ()
+            previous = event_id(parent.id) if parent else None
+            parent_events = (previous,) if previous else ()
             event = history.emit(stage_id=stage, kind='configuration-proposed', entity_ids=(config.id,),
                 parent_event_ids=parent_events, changes={'parent_configuration_id': parent.id if parent else None,
                 'added_site_ids': tuple(sorted(new-old)), 'removed_site_ids': tuple(sorted(old-new)),
@@ -244,8 +272,9 @@ def propose_configurations(catalog, ledger, family_id, *, parent_ids=(), witness
             omitted.append(configuration_id)
             dispositions[configuration_id] = 'not-explored/work-limit'
             if history is not None:
+                previous = event_id(configuration_id)
                 history.emit(stage_id=stage, kind='configuration-not-explored', entity_ids=(configuration_id,),
-                             parent_event_ids=(event_ids[configuration_id],) if configuration_id in event_ids else (),
+                             parent_event_ids=(previous,) if previous else (),
                              changes={'reason': 'expansion-limit', 'disposition': 'not-explored/work-limit'})
     pending = len(streams)
     truncated = bool(pending or omitted)

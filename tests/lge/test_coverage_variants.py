@@ -171,3 +171,86 @@ def test_parent_neighborhood_materializes_additions_and_swaps():
     assert len(swap.changes['added_site_ids']) == 1
     assert len(swap.changes['lost_supported_allele_ids']) == 1
     assert len(swap.changes['gained_supported_allele_ids']) == 1
+
+
+def test_existing_configurations_keep_beam_omissions_on_repeated_calls():
+    v = api(); cat, fam, f, rs = fixture()
+    populated = v.propose_configurations(cat, ConfigurationLedger(cat.semantic_digest, ()), fam.id).ledger
+    history = CoverageHistory(run_id='repeated')
+    for config in populated.configurations:
+        history.emit(stage_id='strict', kind='configuration-proposed', entity_ids=(config.id,))
+    for _ in range(2):
+        before = len(history.events)
+        batch = v.propose_configurations(cat, populated, fam.id,
+            limits=v.SubsetLimits(beam_width=1, expansion_limit=256), history=history)
+        assert not batch.new_ids
+        assert batch.omitted_materialized_ids
+        assert batch.truncated and batch.stop_cause == 'beam-limit'
+        assert all(batch.dispositions[x] == 'not-explored/work-limit' for x in batch.omitted_materialized_ids)
+        omissions = [e for e in history.events[before:] if e.kind == 'configuration-not-explored']
+        assert set(batch.omitted_materialized_ids) <= {x for e in omissions for x in e.entity_ids}
+        assert all(e.changes['reason'] == 'beam-limit' for e in omissions)
+        assert all(e.parent_event_ids for e in omissions)
+        assert batch.ledger == populated
+
+
+def test_proposal_lineage_does_not_access_global_event_stream():
+    class IndexedOnlyHistory(CoverageHistory):
+        @property
+        def events(self):
+            raise AssertionError('proposal traversed full history')
+    v = api(); cat, fam, f, rs = fixture()
+    full = v.make_configuration(cat, fam.id, (f.id,), tuple(r.id for r in rs))
+    history = IndexedOnlyHistory(run_id='indexed')
+    parent_event = history.emit(stage_id='strict',kind='generated',entity_ids=(full.id,))
+    for i in range(20):
+        history.emit(stage_id='strict',kind='generated',entity_ids=(f'unrelated-{i}',))
+    batch = v.propose_configurations(cat,ConfigurationLedger(cat.semantic_digest,(full,)),fam.id,
+        parent_ids=(full.id,),witnesses=(v.ProposalWitness('remove',(rs[0].id,)),),history=history)
+    desired = v.make_configuration(cat,fam.id,(f.id,),tuple(r.id for r in rs[1:]))
+    assert desired.id in batch.new_ids
+    assert parent_event.id in history.latest_event(desired.id).parent_event_ids
+
+
+INVALID_LIMITS = (True, False, 1.5, float('nan'), float('inf'), float('-inf'), 0, -1)
+
+
+@pytest.mark.parametrize('value', INVALID_LIMITS)
+@pytest.mark.parametrize('name', ('min_size', 'max_size'))
+@pytest.mark.parametrize('source', ('explicit', 'catalog'))
+def test_rejects_invalid_size_bound_types(value, name, source):
+    import json
+    from dataclasses import replace
+    v = api(); cat, fam, f, rs = fixture()
+    kwargs = {}
+    if source == 'explicit':
+        kwargs[name] = value
+    else:
+        key = 'amplicon_size_min' if name == 'min_size' else 'amplicon_size_max'
+        cat = replace(cat, resolved_config_json=json.dumps({key:value}))
+    with pytest.raises(ValueError, match='bounds'):
+        v.make_configuration(cat,fam.id,(f.id,),(rs[0].id,),**kwargs)
+
+
+@pytest.mark.parametrize('value', INVALID_LIMITS)
+@pytest.mark.parametrize('name', ('beam_width', 'expansion_limit'))
+def test_rejects_invalid_work_limit_types(value,name):
+    with pytest.raises(ValueError,match='limits'):
+        api().SubsetLimits(**{name:value})
+
+
+@pytest.mark.parametrize('value', INVALID_LIMITS)
+@pytest.mark.parametrize('name', ('min_size', 'max_size'))
+def test_proposal_context_rejects_invalid_size_bounds(value,name):
+    with pytest.raises(ValueError,match='bounds'):
+        api().ProposalContext(**{name:value})
+
+
+def test_invalid_resolved_bounds_fail_before_any_history_mutation():
+    from dataclasses import replace
+    v = api(); cat, fam, f, rs = fixture()
+    cat = replace(cat,resolved_config_json='{"amplicon_size_max": NaN}')
+    h = CoverageHistory(run_id='invalid')
+    with pytest.raises(ValueError,match='bounds'):
+        v.propose_configurations(cat,ConfigurationLedger(cat.semantic_digest,()),fam.id,history=h)
+    assert not h.events

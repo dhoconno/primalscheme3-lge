@@ -109,6 +109,7 @@ class CoverageHistory:
         self.run_id = run_id
         self._records = {name: [] for name in self._streams}
         self._indexes = {name: {} for name in self._streams}
+        self._latest_event_by_entity: dict[str, DecisionEvent] = {}
         if self.directory is not None:
             self.directory.mkdir(parents=True, exist_ok=True)
             for name, cls in self._streams.items():
@@ -175,6 +176,9 @@ class CoverageHistory:
     def _remember(self, name, record):
         self._records[name].append(record)
         self._indexes[name][record.id] = record
+        if name == 'events':
+            for entity_id in record.entity_ids:
+                self._latest_event_by_entity[entity_id] = record
 
     def _append(self, name, record):
         existing = self._indexes[name].get(record.id)
@@ -206,6 +210,10 @@ class CoverageHistory:
     @property
     def last_complete_stage(self) -> StageSnapshot | None:
         return next((s for s in reversed(self.snapshots) if s.completeness == 'complete'), None)
+
+    def latest_event(self, entity_id: str) -> DecisionEvent | None:
+        """O(1) latest causal event lookup, maintained on emit and reload."""
+        return self._latest_event_by_entity.get(entity_id)
 
     def record_evidence(self, *, entity_ids, measurement, dependency_key, values, status):
         return self._append('evidence', IntrinsicEvidence(entity_ids, measurement, dependency_key, values, status))
