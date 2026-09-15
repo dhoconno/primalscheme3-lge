@@ -61,7 +61,49 @@ def _mapped_site(target, record):
 
 
 HISTORY_ORIGIN_POLICY = 'grouped-row-origins/v1'
+HISTORY_ASSESSMENT_POLICY = 'grouped-profile-conditions/v1'
 _ORIGIN_FIELDS = frozenset(('row_index', 'alignment_footprint', 'support', 'row_frequency_weight'))
+
+
+def discovery_condition_rows(query_result):
+    """Yield lossless condition views with their persisted assessment context.
+
+    Conditions are not standalone AssessmentRecords: source_assessment_id and
+    origin_evidence_id resolve their immutable context and every row origin.
+    Both live history queries and serialized query dictionaries are supported.
+    Nonsequence groups have no chemistry conditions; their not-evaluated summary
+    remains available in the original query's assessments.
+    """
+    def plain(record):
+        return record.to_dict() if hasattr(record, 'to_dict') else record
+
+    evidence = {item['id']: item for item in map(plain, query_result['evidence'])}
+    for assessment in map(plain, query_result['assessments']):
+        if assessment['check_name'] != 'profile-and-reference':
+            continue
+        for identity in assessment['evidence_ids']:
+            item = evidence.get(identity)
+            if item is None or item['measurement'] != 'row-enumeration':
+                continue
+            group = item['values']
+            if group.get('origin_policy') != HISTORY_ORIGIN_POLICY:
+                continue
+            for name, condition in group['common']['checks'].items():
+                yield {
+                    'policy': HISTORY_ASSESSMENT_POLICY,
+                    'source_assessment_id': assessment['id'],
+                    'origin_evidence_id': identity,
+                    'run_id': assessment['run_id'],
+                    'stage_id': assessment['stage_id'],
+                    'entity_ids': assessment['entity_ids'],
+                    'pool': assessment['pool'],
+                    'profile_id': assessment['profile_id'],
+                    'context_digest': assessment['context_digest'],
+                    'kernel_versions': assessment['kernel_versions'],
+                    'check_name': name,
+                    'reason': condition.get('reason', 'independent-profile-condition'),
+                    'condition': condition,
+                }
 
 
 def _group_variant_records(records, target, row_content_digests):
@@ -112,12 +154,15 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                 'minimum_frequency': {name: p.min_base_freq for name, p in sorted(profiles.items())},
                 'frequency_policy': VARIANT_FREQUENCY_POLICY,
                 'history_origin_policy': HISTORY_ORIGIN_POLICY,
+                'history_assessment_policy': HISTORY_ASSESSMENT_POLICY,
                 'maximum_alignment_walk': {name: p.primer_max_walk for name, p in sorted(profiles.items())},
                 'enumeration': 'row-anchor-profile-length/v2', 'discovery_length_mode': length_mode,
                 'ambiguous_expansion_limit': 256,
                 'amplicon_size_min': config.amplicon_size_min,
                 'amplicon_size_max': config.amplicon_size_max,
                 'indexes': indexes}
+    config.discovery_workers_by_target_profile = {}
+    config.discovery_workers_by_msa = {}
     sites, dispositions = {}, {t.id: 'enumerated' for t in targets}
     stage = 'discovery'
     kernels = {name: version(name) for name in ('primalscheme3', 'primalschemers', 'primer3-py')}
@@ -141,8 +186,14 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                 history.emit(stage_id=stage, kind='profile-anchor-boundary', entity_ids=(target.id,),
                              changes={'profile_id': profile_id, 'requested': indexes,
                                       'enumerated': profile_indexes, 'reason': 'profile-minimum-length'})
-            records, _ = discover(np.array(target.rows), profile, indexes=profile_indexes, variant_mode=True,
+            records, workers = discover(np.array(target.rows), profile, indexes=profile_indexes, variant_mode=True,
                                   discovery_length_mode=length_mode)
+            config.discovery_workers_by_target_profile.setdefault(target.id, {})[profile_id] = workers
+            config.discovery_workers_by_msa[str(target.source_msa_index)] = max(
+                config.discovery_workers_by_target_profile[target.id].values())
+            history.emit(stage_id=stage, kind='discovery-execution', entity_ids=(target.id,),
+                         changes={'profile_id': profile_id, 'source_msa_index': target.source_msa_index,
+                                  'requested_workers': profile.ncores, 'actual_workers': workers})
             for group in _group_variant_records(records, target, row_content_digests):
                 record = group['common']
                 site = _mapped_site(target, record) if record['sequence'] else None
@@ -158,7 +209,6 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                                                   'origin_count': len(group['origins']),
                                                   'origin_evidence_id': evidence.id, 'reason': record['reason']})
                 evidence_ids = [evidence.id]
-                check_assessments = []
                 if site:
                     numeric = history.record_evidence(entity_ids=(site.species_id,), measurement='oligo-thermodynamics',
                         dependency_key={'sequence': site.sequence, 'kernels': kernels,
@@ -168,17 +218,12 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                         values={name: check['value'] for name, check in record['checks'].items()
                                 if name != 'minimum-frequency'}, status='evaluated')
                     evidence_ids.append(numeric.id)
-                    for check_name, check in record['checks'].items():
-                        check_assessments.append(history.assess(stage_id=stage, entity_ids=(site.id,), pool=None,
-                            context_digest=context_digest, profile_id=profile_id, kernel_versions=kernels,
-                            thresholds={k: v for k, v in check.items() if k in ('minimum', 'maximum')},
-                            check_name=check_name, outcome=check['outcome'],
-                            reason=check.get('reason', 'independent-profile-condition'),
-                            evidence_ids=(evidence.id if check_name == 'minimum-frequency' else numeric.id,)).id)
                 accepted = site is not None and record['accepted'] and site.reference_footprint is not None
                 assessment = history.assess(stage_id=stage, entity_ids=(entity_id,), pool=None,
                     context_digest=context_digest, profile_id=profile_id,
-                    kernel_versions=kernels, thresholds=resolved['profiles'][profile_id],
+                    kernel_versions=kernels, thresholds=resolved['profiles'][profile_id] | {
+                        'minimum_frequency': profile.min_base_freq,
+                        'assessment_policy': HISTORY_ASSESSMENT_POLICY},
                     check_name='profile-and-reference', outcome='pass' if accepted else ('fail' if site else 'not-evaluated'),
                     reason=(site.mapping_failure or record['reason']) if site else record['reason'],
                     evidence_ids=tuple(evidence_ids))
@@ -191,8 +236,11 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                         generated_profile_ids=(profile_id,) + (previous.generated_profile_ids if previous else ()),
                         intrinsic_evidence_ids=tuple(evidence_ids) + (previous.intrinsic_evidence_ids if previous else ()))
                 history.emit(stage_id=stage, kind='assessed', entity_ids=(entity_id,),
-                             parent_event_ids=(generated.id,), assessment_ids=tuple(check_assessments) + (assessment.id,),
-                             changes={'selectable_in_profile': accepted})
+                             parent_event_ids=(generated.id,), assessment_ids=(assessment.id,),
+                             changes={'selectable_in_profile': accepted,
+                                      'assessment_policy': HISTORY_ASSESSMENT_POLICY,
+                                      'failed_checks': tuple(name for name, check in record['checks'].items()
+                                                             if check['outcome'] == 'fail')})
                 dispositions[entity_id] = 'selectable' if accepted or dispositions.get(entity_id) == 'selectable' else ('rejected' if site else 'not-evaluated')
     families = []
     for target in targets:

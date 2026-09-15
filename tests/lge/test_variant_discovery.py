@@ -1,6 +1,7 @@
 """Variant evidence precedes all cloud-level filters."""
 from dataclasses import replace
 import numpy as np
+import pytest
 from primalscheme3.core.config import Config
 from primalscheme3.core.parallel_discovery import discover
 from primalscheme3.panel.coverage_types import Target
@@ -412,3 +413,71 @@ def test_duplicate_rows_expand_origins_without_multiplying_history_decisions():
         assert all(len({o['row_id'] for o in e.values['origins']}) == copies for e in occurrences)
         counts.append((len(occurrences), len(history.assessments), len(history.events)))
     assert counts[0] == counts[1]
+
+
+@pytest.mark.parametrize("length_mode", ("first-compatible", "all"))
+def test_compact_condition_queries_preserve_every_primitive_check_after_reload(tmp_path, length_mode):
+    from primalscheme3.panel.coverage_discovery import (
+        build_variant_catalog, discovery_profiles, discovery_condition_rows,
+    )
+    from primalscheme3.panel.coverage_history import SQLiteCoverageHistory
+    from primalscheme3.panel.coverage_types import canonical_json
+    t = target([SHARED, SHARED, SHARED[:-1] + 'N', 'A' * len(SHARED), 'N' * len(SHARED)])
+    config = Config(min_base_freq=.25)
+    path = tmp_path / 'history'
+    history = SQLiteCoverageHistory(path, run_id='conditions')
+    build_variant_catalog((t,), config, indexes=([len(SHARED)], []), history=history, length_mode=length_mode)
+    groups = [e for e in history.evidence if e.measurement == 'row-enumeration']
+    assert len(history.assessments) == len(groups)
+    query = history.query(stage_id='discovery')
+    before = list(discovery_condition_rows(query))
+    import json
+    serialized = json.loads(canonical_json({k: [r.to_dict() for r in v] for k, v in query.items()}))
+    assert canonical_json(before) == canonical_json(list(discovery_condition_rows(serialized)))
+    history.close()
+    history = SQLiteCoverageHistory(path, run_id='conditions')
+    assert before == list(discovery_condition_rows(history.query(stage_id='discovery')))
+    for name, profile in discovery_profiles(config).items():
+        raw, _ = discover(np.array(t.rows), profile, indexes=([len(SHARED)], []), variant_mode=True, discovery_length_mode=length_mode)
+        query = history.query(stage_id='discovery', profile_id=name)
+        evidence = {e.id: e for e in query['evidence']}
+        assessments = {a.id: a for a in query['assessments']}
+        expanded = []
+        for condition in discovery_condition_rows(query):
+            assessment = assessments[condition['source_assessment_id']]
+            assert condition['stage_id'] == 'discovery'
+            assert condition['profile_id'] == name
+            assert condition['kernel_versions'] == dict(assessment.kernel_versions)
+            assert condition['context_digest'] == assessment.context_digest
+            assert assessment.thresholds['minimum_frequency'] == .25
+            group = evidence[condition['origin_evidence_id']].values
+            for origin in group['origins']:
+                expanded.append((origin['row_index'], group['common']['sequence'],
+                                 condition['check_name'], condition['condition']))
+        expected = [(r['row_index'], r['sequence'], k, v) for r in raw for k, v in r['checks'].items()]
+        assert sorted(map(canonical_json, expanded)) == sorted(map(canonical_json, expected))
+    assert any(c['condition']['outcome'] == 'not-evaluated' for c in before)
+    assert any(c['condition']['outcome'] == 'fail' for c in before)
+    assert any(a.outcome == 'not-evaluated' for a in history.assessments)
+    history.close()
+
+
+def test_discovery_records_actual_workers_without_changing_scientific_identity():
+    import json
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    from primalscheme3.panel.coverage_history import CoverageHistory
+    t = target([SHARED])
+    config = Config(selection_algorithm='allele-coverage', amplicon_size_min=360, ncores=4)
+    history = CoverageHistory(None, run_id='workers')
+    catalog = build_variant_catalog((t,), config, indexes=([len(SHARED)], []), history=history)
+    assert config.discovery_workers_by_target_profile == {'t': {'high-gc': 1, 'normal': 1}}
+    assert config.discovery_workers_by_msa == {'0': 1}
+    assert config.discovery_core_count == 1
+    execution = [e for e in history.events if e.kind == 'discovery-execution']
+    assert len(execution) == 2
+    assert all(e.changes['requested_workers'] == 4 and e.changes['actual_workers'] == 1 for e in execution)
+    resolved = json.loads(catalog.resolved_config_json)
+    assert resolved['history_assessment_policy'] == 'grouped-profile-conditions/v1'
+    other = Config(selection_algorithm='allele-coverage', amplicon_size_min=360, ncores=1)
+    same = build_variant_catalog((t,), other, indexes=([len(SHARED)], []))
+    assert catalog.semantic_digest == same.semantic_digest
