@@ -38,6 +38,9 @@ def main():
     parser.add_argument("--anchor-count", type=int, default=10)
     parser.add_argument("--full", action="store_true")
     parser.add_argument("--cores", type=int, default=4)
+    parser.add_argument(
+        "--history-backend", choices=("jsonl", "sqlite"), default="jsonl"
+    )
     args = parser.parse_args()
     if args.anchor_start < 0 or args.anchor_count < 1 or args.cores < 1:
         parser.error("positive count/cores and nonnegative start required")
@@ -45,6 +48,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     start = time.monotonic()
     sources = []
+    history = None
     receipt = {
         "workflow": "development-variant-discovery-probe",
         "version": 1,
@@ -98,7 +102,10 @@ def main():
                     build_variant_catalog,
                     variant_targets,
                 )
-                from primalscheme3.panel.coverage_history import CoverageHistory
+                from primalscheme3.panel.coverage_history import (
+                    CoverageHistory,
+                    SQLiteCoverageHistory,
+                )
 
                 config = Config(
                     terminal_gap_policy=TerminalGapPolicy.OBSERVED_ONLY,
@@ -140,7 +147,12 @@ def main():
                     candidate_profiles="union",
                     indexes=indexes,
                 )
-                history = CoverageHistory(
+                history_class = (
+                    SQLiteCoverageHistory
+                    if args.history_backend == "sqlite"
+                    else CoverageHistory
+                )
+                history = history_class(
                     args.output / "history", run_id="development-discovery-probe"
                 )
                 catalog = build_variant_catalog(
@@ -164,6 +176,8 @@ def main():
             except BaseException:
                 traceback.print_exc()
     finally:
+        if history is not None and hasattr(history, "close"):
+            history.close()
         receipt["wallSeconds"] = time.monotonic() - start
         receipt["peakRSSRaw"] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         receipt["peakRSSScope"] = "parent-process-only; excludes discovery worker RSS"
