@@ -76,6 +76,8 @@ def _matrix(root: Path, *, fail: bool = False, executable: str | None = None) ->
     )
     for name in ("historical-independent", "historical-combined"):
         _saved_control(root, name)
+    probe_artifact = root / "identity-probe.txt"
+    probe_artifact.write_text("identity probe fixture\n")
     matrix = {
         "schemaVersion": "allele-coverage-benchmark-matrix/v1",
         "fixtureAnalysis": "analysis.lungfishprimeranalysis",
@@ -98,7 +100,9 @@ def _matrix(root: Path, *, fail: bool = False, executable: str | None = None) ->
                 "id": "existing-lge.3",
                 "kind": "native-execution",
                 **({"executable": executable} if executable else {}),
+                "workingDirectory": str(root),
                 "identityProbeArgv": ["-c", probe],
+                "identityProbeArtifacts": [str(probe_artifact)],
                 "expectedToolIdentity": {
                     "name": "fixture-tool",
                     "version": "1.2.3",
@@ -124,7 +128,7 @@ def _matrix(root: Path, *, fail: bool = False, executable: str | None = None) ->
                     "requiredResolvedOptionKeys": ["selectionAlgorithm", "poolCount"],
                     "argvOptionMap": {
                         "--selection-algorithm": "selectionAlgorithm",
-                        "--n-pools": "poolCount"
+                        "--n-pools": {"key": "poolCount", "valueFromNextArg": True}
                     }
                 },
             },
@@ -234,6 +238,10 @@ def test_failed_subprocess_records_status_and_stderr(tmp_path):
     assert len(consumed) == 2
     assert all(item["path"].startswith("snapshot/") for item in consumed)
     assert receipt["toolIdentity"] == {"name": "fixture-tool", "version": "1.2.3"}
+    assert receipt["workingDirectory"] == str((tmp_path / "fixtures").resolve())
+    assert receipt["identityProbeArtifacts"][0]["sha256"] == _sha(
+        tmp_path / "fixtures" / "identity-probe.txt"
+    )
     assert receipt["sourceIdentity"]["sourceDigest"] == "digest123"
     assert receipt["runtimeIdentity"]["pythonExecutable"] == "/measured/python"
     assert receipt["harnessIdentity"]["source"]

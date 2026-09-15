@@ -384,14 +384,29 @@ def validate_option_contract(
     missing = [key for key in required if key not in resolved]
     if missing:
         raise ValueError(f"{entry['id']} missing required resolved options: {missing}")
-    for flag, key in option_map.items():
+    for flag, mapping in option_map.items():
+        if isinstance(mapping, str):
+            key = mapping
+            value_from_next_arg = True
+            declared_argv_value = None
+        elif isinstance(mapping, dict):
+            key = mapping.get("key")
+            value_from_next_arg = mapping.get("valueFromNextArg", False)
+            declared_argv_value = mapping.get("value")
+        else:
+            raise ValueError(f"{entry['id']} invalid argv mapping for {flag}")
         if key not in required:
             raise ValueError(f"{entry['id']} argv mapping uses undeclared option {key}")
         positions = [index for index, value in enumerate(argv) if value == flag]
-        if len(positions) != 1 or positions[0] + 1 >= len(argv):
-            raise ValueError(f"{entry['id']} requires exactly one {flag} value")
-        argv_value = argv[positions[0] + 1]
-        if not option_values_match(argv_value, resolved[key]):
+        if len(positions) != 1:
+            raise ValueError(f"{entry['id']} requires exactly one {flag}")
+        if value_from_next_arg:
+            if positions[0] + 1 >= len(argv):
+                raise ValueError(f"{entry['id']} requires a value after {flag}")
+            argv_value = argv[positions[0] + 1]
+        else:
+            argv_value = declared_argv_value
+        if not option_values_match(str(argv_value), resolved[key]):
             raise ValueError(
                 f"{entry['id']} argv mismatch for {key}: {argv_value!r} != {resolved[key]!r}"
             )
@@ -409,7 +424,9 @@ def validate_actual_resolved_options(
         payload = payload[key]
     if not isinstance(payload, dict):
         raise ValueError(f"{entry['id']} actual resolved options are not an object")
-    required = entry["optionContract"]["requiredResolvedOptionKeys"]
+    required = declaration.get(
+        "requiredKeys", entry["optionContract"]["requiredResolvedOptionKeys"]
+    )
     for key in required:
         if key not in payload or payload[key] != entry["resolvedOptions"][key]:
             raise ValueError(
@@ -432,6 +449,9 @@ def run_entry(
     stdout_path = run_dir / "stdout.txt"
     argv = expand_argv(entry, native_executable, run_dir, inputs, output)
     probe_argv = [argv[0], *entry.get("identityProbeArgv", [])]
+    working_directory = Path(entry["workingDirectory"]).resolve()
+    if not working_directory.is_dir():
+        raise ValueError(f"{entry['id']} workingDirectory is not a directory")
     consumed = scientific_input_artifacts(inputs, output)
     if not entry.get("optionsFullyResolved") or not entry.get("resolvedOptions"):
         raise ValueError(f"{entry['id']} requires complete resolvedOptions")
@@ -442,11 +462,24 @@ def run_entry(
     executable_artifact: dict[str, Any] | None = None
     tool_identity: dict[str, str] | None = None
     actual_options_artifact: dict[str, Any] | None = None
+    probe_artifacts: list[dict[str, Any]] = []
     status = "launch-error"
     error = ""
     try:
+        for index, value in enumerate(entry.get("identityProbeArtifacts", [])):
+            source = Path(value).resolve()
+            destination = run_dir / "identity-probe-artifacts" / f"{index:02d}-{source.name}"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            probe_artifacts.append(descriptor(destination, relative_to=output))
         executable_artifact = descriptor(Path(argv[0]))
-        probe = subprocess.run(probe_argv, capture_output=True, text=True, check=False)
+        probe = subprocess.run(
+            probe_argv,
+            cwd=working_directory,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         if probe.returncode != 0:
             raise RuntimeError(
                 f"identity probe exited {probe.returncode}: {probe.stderr.strip()}"
@@ -458,7 +491,13 @@ def run_entry(
             raise ValueError(f"identity probe missing fields: {missing}")
         tool_identity = validate_tool_identity(entry, probe_payload)
         validate_option_contract(entry, argv, probe_payload["toolVersion"])
-        completed = subprocess.run(argv, capture_output=True, text=True, check=False)
+        completed = subprocess.run(
+            argv,
+            cwd=working_directory,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
         status = "success" if completed.returncode == 0 else "failed"
         stdout_path.write_text(completed.stdout)
         stderr_path.write_text(completed.stderr)
@@ -501,12 +540,14 @@ def run_entry(
         "status": status,
         "argv": argv,
         "command": shlex.join(argv),
+        "workingDirectory": str(working_directory),
         "identityProbe": {
             "argv": probe_argv,
             "exitStatus": None if probe is None else probe.returncode,
             "stdout": None if probe is None else probe.stdout,
             "stderr": None if probe is None else probe.stderr,
         },
+        "identityProbeArtifacts": probe_artifacts,
         "toolIdentity": tool_identity,
         "resolvedOptions": entry["resolvedOptions"],
         "optionsResolution": "matrix-explicit-complete",

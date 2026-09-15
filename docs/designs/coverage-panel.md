@@ -243,6 +243,7 @@ interface (the executable path can instead be supplied by `--native-executable`)
 {
   "id": "native-allele-coverage",
   "kind": "native-execution",
+  "workingDirectory": "/clean/tool/source/root",
   "identityProbeArgv": ["--capabilities-json"],
   "expectedToolIdentity": {
     "name": "primalscheme3",
@@ -331,6 +332,12 @@ runtime dependency. The version-bound `optionContract` requires every listed key
 and compares each mapped argv value with `resolvedOptions` before launch. When
 `actualResolvedOptions` is present, the runner hashes the native config and verifies
 its resolved values after execution; any mismatch makes the run fail publication.
+The same explicit `workingDirectory` is used for the identity probe and scientific
+process so Python import resolution cannot select a neighboring checkout. Optional
+`identityProbeArtifacts` are copied into the run and hashed in its receipt. For
+value-taking flags, `argvOptionMap` maps the flag directly to a resolved key (or
+uses `{"key": "name", "valueFromNextArg": true}`). Boolean switches use
+`{"key": "name", "value": true}` or `false`, making their semantics explicit.
 
 Each executed matrix row writes this minimum receipt shape, with additional schema,
 workflow, shell-command and stdout fields allowed:
