@@ -49,6 +49,14 @@ CONTROL_DEFINITIONS = {
 }
 
 
+class VerificationError(ValueError):
+    """A manifest verification failure with durable expected/observed evidence."""
+
+    def __init__(self, message: str, evidence: dict[str, Any]):
+        super().__init__(message)
+        self.evidence = evidence
+
+
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -107,10 +115,11 @@ def runtime_identity() -> dict[str, Any]:
 
 
 def load_and_verify_inputs(
-    fixture_root: Path, matrix: dict[str, Any]
+    fixture_root: Path, matrix: dict[str, Any], attempted: list[dict[str, Any]]
 ) -> tuple[Path, list[dict[str, Any]], list[dict[str, Any]]]:
     analysis = (fixture_root / safe_relative(matrix["fixtureAnalysis"])).resolve()
     manifest_path = analysis / "manifest.json"
+    attempted.append({**descriptor(manifest_path), "role": "fixture-manifest"})
     manifest = json.loads(manifest_path.read_text())
     artifacts = {item["relativePath"]: item for item in manifest.get("artifacts", [])}
     requested = set(matrix["inputLabels"])
@@ -127,10 +136,19 @@ def load_and_verify_inputs(
             relative = safe_relative(relative_string)
             path = analysis / relative
             actual = descriptor(path)
+            evidence = {
+                "path": str(path.resolve()),
+                "manifestPath": relative_string,
+                "expectedByteSize": declared["byteSize"],
+                "observedByteSize": actual["byteSize"],
+                "expectedSha256": declared["sha256"],
+                "observedSha256": actual["sha256"],
+            }
+            attempted.append({**actual, "role": "attempted-scientific-input", "expected": declared})
             if actual["byteSize"] != declared["byteSize"]:
-                raise ValueError(f"size mismatch for {relative_string}")
+                raise VerificationError(f"size mismatch for {relative_string}", evidence)
             if actual["sha256"] != declared["sha256"]:
-                raise ValueError(f"checksum mismatch for {relative_string}")
+                raise VerificationError(f"checksum mismatch for {relative_string}", evidence)
             verified.append({**actual, "manifestPath": relative_string, "role": declared.get("role")})
     return analysis, selected, verified
 
@@ -182,7 +200,98 @@ def copy_snapshot(
     return copied
 
 
-def expand_argv(entry: dict[str, Any], native_executable: Path, run_dir: Path, inputs: list[dict[str, Any]], output: Path) -> list[str]:
+def freeze_saved_control(
+    entry: dict[str, Any], fixture_root: Path, output: Path
+) -> dict[str, Any]:
+    control_dir = output / "controls" / entry["id"]
+    artifact_dir = control_dir / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    source_root = (fixture_root / safe_relative(entry["root"])).resolve()
+    manifest_relative = safe_relative(entry["manifest"])
+    manifest_path = source_root / manifest_relative
+    manifest = json.loads(manifest_path.read_text())
+    source_artifacts = [{**descriptor(manifest_path), "role": "control-manifest"}]
+    frozen_artifacts: list[dict[str, Any]] = []
+    for declared in manifest.get("artifacts", []):
+        relative = safe_relative(declared["relativePath"])
+        source = source_root / relative
+        actual = descriptor(source)
+        evidence = {
+            "path": str(source.resolve()),
+            "manifestPath": str(relative),
+            "expectedByteSize": declared["byteSize"],
+            "observedByteSize": actual["byteSize"],
+            "expectedSha256": declared["sha256"],
+            "observedSha256": actual["sha256"],
+        }
+        if actual["byteSize"] != declared["byteSize"]:
+            raise VerificationError(f"size mismatch for control {entry['id']}: {relative}", evidence)
+        if actual["sha256"] != declared["sha256"]:
+            raise VerificationError(
+                f"checksum mismatch for control {entry['id']}: {relative}", evidence
+            )
+        source_artifacts.append(actual)
+        destination = artifact_dir / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        frozen = descriptor(destination, relative_to=output)
+        if frozen["sha256"] != declared["sha256"] or frozen["byteSize"] != declared["byteSize"]:
+            raise RuntimeError(f"frozen control verification failed: {entry['id']}: {relative}")
+        frozen_artifacts.append(frozen)
+    manifest_destination = artifact_dir / manifest_relative
+    manifest_destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(manifest_path, manifest_destination)
+    frozen_artifacts.append(descriptor(manifest_destination, relative_to=output))
+    receipt = {
+        "schemaVersion": "allele-coverage-saved-control/v1",
+        "controlIdentity": CONTROL_DEFINITIONS.get(entry["id"], entry.get("controlIdentity")),
+        "status": "frozen",
+        "sourceArtifacts": source_artifacts,
+        "artifacts": frozen_artifacts,
+    }
+    write_json(control_dir / "receipt.json", receipt)
+    return receipt
+
+
+def write_pending_control(entry: dict[str, Any], output: Path) -> dict[str, Any]:
+    control_dir = output / "controls" / entry["id"]
+    control_dir.mkdir(parents=True)
+    receipt = {
+        "schemaVersion": "allele-coverage-pending-control/v1",
+        "controlIdentity": CONTROL_DEFINITIONS.get(entry["id"], entry.get("controlIdentity")),
+        "status": "pending-execution",
+        "artifacts": [],
+    }
+    write_json(control_dir / "receipt.json", receipt)
+    return receipt
+
+
+def scientific_input_artifacts(
+    inputs: list[dict[str, Any]], output: Path
+) -> list[dict[str, Any]]:
+    artifacts = []
+    for item in inputs:
+        for relative in item["snapshotArtifactPaths"]:
+            if relative.endswith("primary.aligned.fasta"):
+                path = output / relative
+                artifacts.append(
+                    {
+                        **descriptor(path, relative_to=output),
+                        "role": "scientific-input",
+                        "label": item["label"],
+                        "sourceOccurrenceID": item["sourceOccurrenceID"],
+                    }
+                )
+    return artifacts
+
+
+def expand_argv(
+    entry: dict[str, Any],
+    native_executable: Path,
+    run_dir: Path,
+    inputs: list[dict[str, Any]],
+    output: Path,
+) -> list[str]:
     executable = str(Path(entry.get("executable", native_executable)).absolute())
     values = {
         "native_executable": executable,
@@ -191,26 +300,89 @@ def expand_argv(entry: dict[str, Any], native_executable: Path, run_dir: Path, i
     }
     argv = [executable]
     for value in entry.get("argv", []):
-        if value == "{inputs}":
-            argv.extend(str((output / p).resolve()) for item in inputs for p in item["snapshotArtifactPaths"] if p.endswith("primary.aligned.fasta"))
+        if value == "{msa_args}":
+            for artifact in scientific_input_artifacts(inputs, output):
+                argv.extend(["--msa", str((output / artifact["path"]).resolve())])
         else:
             argv.append(str(value).format(**values))
     return argv
 
 
-def run_entry(entry: dict[str, Any], native_executable: Path, output: Path, inputs: list[dict[str, Any]], input_artifacts: list[dict[str, Any]]) -> int:
+def validate_tool_identity(entry: dict[str, Any], probe: dict[str, Any]) -> dict[str, str]:
+    expected = entry.get("expectedToolIdentity")
+    if not expected:
+        raise ValueError(f"{entry['id']} requires expectedToolIdentity")
+    tool = probe["tool"]
+    tool_name = tool if isinstance(tool, str) else tool["name"]
+    observed = {
+        "name": tool_name,
+        "version": probe["toolVersion"],
+        "gitCommit": probe["source"].get("gitCommit"),
+    }
+    for key, value in expected.items():
+        actual = observed.get(key)
+        if key == "gitCommit" and actual is not None:
+            matches = actual.startswith(value)
+        else:
+            matches = actual == value
+        if not matches:
+            raise ValueError(
+                f"{entry['id']} identity mismatch for {key}: expected {value!r}, "
+                f"observed {actual!r}"
+            )
+    return {"name": observed["name"], "version": observed["version"]}
+
+
+def run_entry(
+    entry: dict[str, Any],
+    native_executable: Path,
+    output: Path,
+    inputs: list[dict[str, Any]],
+    source_artifacts: list[dict[str, Any]],
+) -> int:
     run_dir = output / "runs" / entry["id"]
     run_dir.mkdir(parents=True)
     stderr_path = run_dir / "stderr.txt"
     stdout_path = run_dir / "stdout.txt"
     argv = expand_argv(entry, native_executable, run_dir, inputs, output)
-    executable_artifact = descriptor(Path(argv[0]))
+    probe_argv = [argv[0], *entry.get("identityProbeArgv", [])]
+    consumed = scientific_input_artifacts(inputs, output)
+    if not entry.get("optionsFullyResolved") or not entry.get("resolvedOptions"):
+        raise ValueError(f"{entry['id']} requires complete resolvedOptions")
     started = time.perf_counter()
-    completed = subprocess.run(argv, capture_output=True, text=True, check=False)
+    completed: subprocess.CompletedProcess[str] | None = None
+    probe: subprocess.CompletedProcess[str] | None = None
+    probe_payload: dict[str, Any] = {}
+    executable_artifact: dict[str, Any] | None = None
+    tool_identity: dict[str, str] | None = None
+    status = "launch-error"
+    error = ""
+    try:
+        executable_artifact = descriptor(Path(argv[0]))
+        probe = subprocess.run(probe_argv, capture_output=True, text=True, check=False)
+        if probe.returncode != 0:
+            raise RuntimeError(
+                f"identity probe exited {probe.returncode}: {probe.stderr.strip()}"
+            )
+        probe_payload = json.loads(probe.stdout)
+        required = ("tool", "toolVersion", "source", "runtime")
+        missing = [key for key in required if key not in probe_payload]
+        if missing:
+            raise ValueError(f"identity probe missing fields: {missing}")
+        tool_identity = validate_tool_identity(entry, probe_payload)
+        completed = subprocess.run(argv, capture_output=True, text=True, check=False)
+        status = "success" if completed.returncode == 0 else "failed"
+        stdout_path.write_text(completed.stdout)
+        stderr_path.write_text(completed.stderr)
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}\n"
+        stdout_path.write_text("")
+        stderr_path.write_text(error)
     elapsed = time.perf_counter() - started
-    stdout_path.write_text(completed.stdout)
-    stderr_path.write_text(completed.stderr)
-    output_artifacts = [descriptor(stdout_path, relative_to=output), descriptor(stderr_path, relative_to=output)]
+    output_artifacts = [
+        descriptor(stdout_path, relative_to=output),
+        descriptor(stderr_path, relative_to=output),
+    ]
     for path in sorted(run_dir.rglob("*")):
         if path.is_file() and path.name not in {"receipt.json", "stdout.txt", "stderr.txt"}:
             output_artifacts.append(descriptor(path, relative_to=output))
@@ -219,20 +391,34 @@ def run_entry(entry: dict[str, Any], native_executable: Path, output: Path, inpu
         "workflow": WORKFLOW,
         "workflowVersion": WORKFLOW_VERSION,
         "controlIdentity": CONTROL_DEFINITIONS.get(entry["id"], entry.get("controlIdentity")),
+        "status": status,
         "argv": argv,
         "command": shlex.join(argv),
-        "resolvedOptions": entry.get("resolvedOptions", {}),
-        "inputArtifacts": [*input_artifacts, {**executable_artifact, "role": "executable"}],
+        "identityProbe": {
+            "argv": probe_argv,
+            "exitStatus": None if probe is None else probe.returncode,
+            "stdout": None if probe is None else probe.stdout,
+            "stderr": None if probe is None else probe.stderr,
+        },
+        "toolIdentity": tool_identity,
+        "resolvedOptions": entry["resolvedOptions"],
+        "optionsResolution": "matrix-explicit-complete",
+        "inputArtifacts": consumed,
+        "sourceArtifacts": source_artifacts,
         "outputArtifacts": output_artifacts,
-        "sourceIdentity": source_identity(),
-        "runtimeIdentity": {**runtime_identity(), "executedTool": executable_artifact},
-        "exitStatus": completed.returncode,
+        "sourceIdentity": probe_payload.get("source"),
+        "runtimeIdentity": probe_payload.get("runtime"),
+        "executedToolArtifact": (
+            None if executable_artifact is None else {**executable_artifact, "role": "executable"}
+        ),
+        "harnessIdentity": {"source": source_identity(), "runtime": runtime_identity()},
+        "exitStatus": None if completed is None else completed.returncode,
         "wallTimeSeconds": elapsed,
         "stderrPath": str(stderr_path.relative_to(output)),
         "stdoutPath": str(stdout_path.relative_to(output)),
     }
     write_json(run_dir / "receipt.json", receipt)
-    return completed.returncode
+    return 1 if completed is None else completed.returncode
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -255,14 +441,17 @@ def execute(args: argparse.Namespace, argv: list[str]) -> int:
     inputs: list[dict[str, Any]] = []
     outputs: list[dict[str, Any]] = []
     error = ""
+    verification_failure: dict[str, Any] | None = None
     try:
+        inputs.append({**descriptor(args.matrix.resolve()), "role": "matrix"})
         matrix = json.loads(args.matrix.read_text())
         if matrix.get("schemaVersion") != "allele-coverage-benchmark-matrix/v1":
             raise ValueError("unsupported benchmark matrix schemaVersion")
-        analysis, selected, verified = load_and_verify_inputs(args.fixture_root.resolve(), matrix)
+        analysis, selected, verified = load_and_verify_inputs(
+            args.fixture_root.resolve(), matrix, inputs
+        )
         outputs = copy_snapshot(analysis, selected, verified, output)
         label_map = json.loads((output / "snapshot" / "source-row-label-map.json").read_text())
-        inputs = [descriptor(args.matrix.resolve()), *verified]
         matrix_copy = output / "matrix.json"
         shutil.copyfile(args.matrix.resolve(), matrix_copy)
         if sha256(matrix_copy) != inputs[0]["sha256"]:
@@ -272,13 +461,33 @@ def execute(args: argparse.Namespace, argv: list[str]) -> int:
         outputs.append(descriptor(output / "control-definitions.json", relative_to=output))
         status = 0
         for entry in matrix.get("comparisons", []):
-            if entry.get("kind") == "historical-artifact":
+            if entry.get("kind") == "saved-artifact":
+                freeze_saved_control(entry, args.fixture_root.resolve(), output)
+                outputs.append(
+                    descriptor(
+                        output / "controls" / entry["id"] / "receipt.json",
+                        relative_to=output,
+                    )
+                )
+                continue
+            if entry.get("kind") == "pending-execution":
+                write_pending_control(entry, output)
+                outputs.append(
+                    descriptor(
+                        output / "controls" / entry["id"] / "receipt.json",
+                        relative_to=output,
+                    )
+                )
                 continue
             if entry.get("kind") != "native-execution":
                 raise ValueError(f"unknown comparison kind: {entry.get('kind')}")
             status = run_entry(entry, args.native_executable, output, label_map["inputs"], inputs)
             if status:
                 break
+    except VerificationError as exc:
+        error = f"{type(exc).__name__}: {exc}\n"
+        verification_failure = exc.evidence
+        status = 1
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}\n"
         status = 1
@@ -302,6 +511,7 @@ def execute(args: argparse.Namespace, argv: list[str]) -> int:
         "exitStatus": status,
         "wallTimeSeconds": time.perf_counter() - started,
         "stderrPath": str(stderr_path.relative_to(output)),
+        "verificationFailure": verification_failure,
     }
     write_json(output / "runner-receipt.json", receipt)
     if error:

@@ -206,15 +206,20 @@ explicit comparison entries. The MHC matrix must distinguish these controls:
     "Mamu-DRB.lungfishmsa", "Mamu-E.lungfishmsa"
   ],
   "comparisons": [
-    {"id": "historical-independent-lge.2", "kind": "historical-artifact"},
-    {"id": "historical-combined-lge.2", "kind": "historical-artifact"},
-    {"id": "existing-lge.3", "kind": "historical-artifact"},
+    {
+      "id": "historical-independent-lge.2", "kind": "saved-artifact",
+      "root": "mhc-primal-scheme.lungfish/Analyses/MHC v1.lungfishprimeranalysis",
+      "manifest": "manifest.json"
+    },
+    {
+      "id": "historical-combined-lge.2", "kind": "saved-artifact",
+      "root": "mhc-primal-scheme.lungfish/Analyses/MHC merged v1.lungfishprimeranalysis",
+      "manifest": "manifest.json"
+    },
+    {"id": "existing-lge.3", "kind": "pending-execution"},
     {
       "id": "upstream-original-3.3.0",
-      "kind": "native-execution",
-      "executable": "/isolated/upstream-3.3.0/bin/primalscheme3",
-      "argv": ["panel-create", "--output", "{output}", "{inputs}"],
-      "resolvedOptions": {}
+      "kind": "pending-execution"
     }
   ]
 }
@@ -226,6 +231,63 @@ isolated environment. It is distinct from saved LGE legacy outputs. Historical
 independent/combined lge.2 artifacts, the existing lge.3 result, and upstream
 original use different scientific profiles and remain diagnostic comparisons until
 they are re-evaluated under one declared metric and specificity contract.
+`saved-artifact` entries require a manifest and freeze every artifact only after
+checking its declared hash and size. Work with no saved result is
+`pending-execution`; a name alone is never treated as a frozen control.
+
+An executable row uses a measured identity probe, an expected identity, and a
+complete resolved-option declaration. This is the native allele-aware baseline
+interface (the executable path can instead be supplied by `--native-executable`):
+
+```json
+{
+  "id": "native-allele-coverage",
+  "kind": "native-execution",
+  "identityProbeArgv": ["--capabilities-json"],
+  "expectedToolIdentity": {
+    "name": "primalscheme3",
+    "version": "3.3.0+lge.4",
+    "gitCommit": "FULL_OR_REVIEWED_COMMIT_PREFIX"
+  },
+  "argv": [
+    "panel-create", "--mode", "equal", "{msa_args}",
+    "--output", "{output}",
+    "--amplicon-size", "200", "--amplicon-size-min", "150",
+    "--amplicon-size-max", "250", "--n-pools", "2",
+    "--min-base-freq", "0.0", "--mapping", "first", "--ncores", "4",
+    "--terminal-gap-policy", "observed-only", "--dimer-score", "-26",
+    "--selection-algorithm", "allele-coverage",
+    "--candidate-profiles", "union",
+    "--coverage-metric", "observed-allele-primer-trimmed",
+    "--coverage-target", "0.95", "--allele-weighting", "distinct-observed",
+    "--specificity-terminal-k", "17", "--mispriming-product-size", "2000",
+    "--optimizer-seed", "0", "--optimizer-starts", "4",
+    "--optimizer-repair-rounds", "2", "--optimizer-time-limit", "120",
+    "--subset-beam-width", "16", "--subset-expansion-limit", "256",
+    "--exchange-width", "2", "--salvage", "off", "--primary-tier", "strict"
+  ],
+  "optionsFullyResolved": true,
+  "resolvedOptions": {
+    "mode": "equal", "ampliconSize": 200, "ampliconSizeMin": 150,
+    "ampliconSizeMax": 250, "poolCount": 2, "minimumBaseFrequency": 0.0,
+    "mapping": "first", "coreCount": 4, "terminalGapPolicy": "observed-only",
+    "dimerScore": -26, "selectionAlgorithm": "allele-coverage",
+    "candidateProfiles": "union",
+    "coverageMetric": "observed-allele-primer-trimmed", "coverageTarget": 0.95,
+    "alleleWeighting": "distinct-observed", "specificityTerminalK": 17,
+    "misprimingProductSize": 2000, "optimizerSeed": 0, "optimizerStarts": 4,
+    "optimizerRepairRounds": 2, "optimizerTimeLimitSeconds": 120,
+    "subsetBeamWidth": 16, "subsetExpansionLimit": 256, "exchangeWidth": 2,
+    "salvage": "off", "primaryTier": "strict"
+  }
+}
+```
+
+`{msa_args}` expands to one `--msa PATH` pair for each verified snapshot MSA in
+manifest order. `{output}` expands to a new path inside the run receipt directory.
+The identity probe must return `tool`, `toolVersion`, `source`, and `runtime`; the
+runner compares the measured name, version, and source commit with
+`expectedToolIdentity` before scientific execution.
 
 Each executed matrix row writes this minimum receipt shape, with additional schema,
 workflow, shell-command and stdout fields allowed:
@@ -244,13 +306,16 @@ receipt = {
 }
 ```
 
-Paths in output records resolve beneath the final evidence directory. Receipts
+Scientific input paths in an execution receipt resolve beneath the final snapshot
+and are rehashed immediately before invocation. Original-bundle descriptors remain
+separate source provenance. Paths in output records resolve beneath the final evidence directory. Receipts
 retain exact argument arrays and reproducible shell rendering, workflow and version,
-resolved options/defaults supplied by the matrix, source commit and dirty state,
-Python/conda/container identity, input/output hashes and sizes, status, wall time,
+explicitly complete resolved options/defaults supplied by the matrix, measured tool
+version/source/runtime identity, harness identity, input/output hashes and sizes, status, wall time,
 and captured stderr. A failed subprocess still writes its receipt and stderr. A
-fixture checksum failure writes runner failure provenance and prevents scientific
-execution.
+launch failure writes the expanded per-run receipt. A fixture checksum failure
+writes attempted manifest/input identity plus expected and observed hashes in runner
+failure provenance and prevents scientific execution.
 
 The deterministic abstract benchmark exercised the real search core on 100 synthetic
 300-base interval targets, 300 candidates and 200 declared overlap edges. One pool,
