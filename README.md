@@ -2,7 +2,13 @@
 
 **This is a separately maintained LGE custom fork, not an upstream PrimalScheme3 release.** It is based on [artic-network/primalscheme3](https://github.com/artic-network/primalscheme3) v3.3.0 and retains upstream authorship and GPL-3.0 licensing.
 
-The custom distribution version is **3.3.0+lge.2**. Its executable remains `primalscheme3`, but `--version` identifies **PrimalScheme3-LGE**. Obtain published custom wheels and source from [GitHub releases](https://github.com/dhoconno/primalscheme3-lge/releases); installing the ordinary PyPI `primalscheme3` package does not select this fork.
+The development distribution version is **3.3.0+lge.4**; these development changes have not been released. Its executable remains `primalscheme3`, but `--version` identifies **PrimalScheme3-LGE**. Obtain published custom wheels and source from [GitHub releases](https://github.com/dhoconno/primalscheme3-lge/releases); installing the ordinary PyPI `primalscheme3` package does not select this fork.
+
+## Development: allele-aware multi-MSA panels
+
+`panel-create --selection-algorithm allele-coverage` combines normal and high-GC candidate discovery, selects compatible primer variants within an amplicon, and optimizes coverage after primer trimming with equal weight per distinct observed allele. The `allele-balanced-v1` preset targets 95% per MSA while retaining useful partial coverage. Strict dimer screening remains −26; optional bounded salvage exports separately audited alternatives and retains strict as primary by default.
+
+The CLI exposes candidate profile, geometry, pool, specificity, subset-search, work-budget and salvage controls. It retains candidate histories and exact reproducibility receipts. `panel-history`, `panel-audit` and `panel-cache` query decisions, revalidate saved outputs and enable verified discovery reuse. See [commands, defaults, interpretation and advanced controls](docs/allele-coverage.md). Legacy and prior coverage modes remain available.
 
 Creation commands accept explicit `--amplicon-size-min` and `--amplicon-size-max` bounds on the full reference-coordinate BED span, including both primers. For example, target `200`, minimum `150`, and maximum `250` permit reported spans from 150 through 250 bases. See [the size contract and supported workflows](docs/lge-fork.md#explicit-amplicon-size-bounds).
 
