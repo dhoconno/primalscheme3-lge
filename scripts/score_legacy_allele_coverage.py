@@ -126,8 +126,6 @@ def _parse_fasta(path: Path) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ..
         cells.append(
             tuple("" if base == "-" and (i < first or i > last) else base for i, base in enumerate(sequence))
         )
-    if any(all(row[i] in ("", "-") for row in cells) for i in range(len(cells[0]))):
-        raise ValueError(f"{path}: MSA contains an empty alignment column")
     return tuple(headers), tuple(cells)
 
 
@@ -287,8 +285,6 @@ def _parse_bed(path: Path) -> list[dict[str, Any]]:
                 "variant": int(match.group("variant")),
             }
         )
-    if not records:
-        raise ValueError(f"{path}: primer BED contains no records")
     return records
 
 
@@ -582,6 +578,8 @@ def _score(
     return {
         "schemaVersion": SCHEMA,
         "metricID": METRIC,
+        "valid": True,
+        "invalidReasons": [],
         "scientificScope": SCOPE,
         "limitations": [
             "Historical primers are not filtered by current discovery eligibility or chemistry.",
@@ -663,6 +661,8 @@ def _provenance(
     stderr: str,
     source_at_start: dict[str, Any],
     output_directory: Path,
+    working_directory: Path,
+    scientific_report_valid: bool,
 ) -> dict[str, Any]:
     current_inputs = []
     for record in inputs:
@@ -675,7 +675,11 @@ def _provenance(
         "workflow": {"name": "historical-native-bed-observed-allele-scoring", "version": "1"},
         "metricID": METRIC,
         "scientificScope": SCOPE,
-        "command": {"argv": argv, "shell": shlex.join(argv)},
+        "command": {
+            "argv": argv,
+            "shell": shlex.join(argv),
+            "workingDirectory": str(working_directory.resolve()),
+        },
         "resolvedOptions": {
             "goal": GOAL,
             "mapping": "first",
@@ -700,6 +704,7 @@ def _provenance(
         "status": status,
         "exitStatus": exit_status,
         "stderr": stderr,
+        "scientificReportValid": scientific_report_valid,
     }
 
 
@@ -722,6 +727,7 @@ def main() -> int:
     output.mkdir(parents=True)
     started = time.monotonic()
     started_at = _now()
+    working_directory = Path.cwd()
     argv = [sys.executable, *sys.argv]
     source_at_start = _source_identity()
     input_specs = [(Path(path), "msa") for path in args.msa]
@@ -765,7 +771,42 @@ def main() -> int:
             stderr="",
             source_at_start=source_at_start,
             output_directory=output,
+            working_directory=working_directory,
+            scientific_report_valid=True,
         )
+        invalid_reasons = []
+        if provenance["inputsChangedDuringRun"]:
+            invalid_reasons.append("scientific inputs changed during execution")
+        if provenance["sourceChangedDuringRun"]:
+            invalid_reasons.append("scientific source changed during execution")
+        if invalid_reasons:
+            report["valid"] = False
+            report["invalidReasons"] = invalid_reasons
+            _write_json(coverage_path, report)
+            outputs = [
+                _descriptor(coverage_path, relative_to=output),
+                _descriptor(mapping_path, relative_to=output),
+            ]
+            stderr = "; ".join(invalid_reasons)
+            failed = _provenance(
+                started_at=started_at,
+                started=started,
+                argv=argv,
+                inputs=inputs,
+                outputs=outputs,
+                status="error",
+                exit_status=1,
+                stderr=stderr,
+                source_at_start=source_at_start,
+                output_directory=output,
+                working_directory=working_directory,
+                scientific_report_valid=False,
+            )
+            for field in ("inputsChangedDuringRun", "sourceChangedDuringRun"):
+                failed[field] = failed[field] or provenance[field]
+            _write_json(output / "provenance.json", failed)
+            print(stderr, file=sys.stderr)
+            return 1
         _write_json(output / "provenance.json", provenance)
         return 0
     except Exception as error:
@@ -787,6 +828,8 @@ def main() -> int:
             stderr=stderr,
             source_at_start=source_at_start,
             output_directory=output,
+            working_directory=working_directory,
+            scientific_report_valid=False,
         )
         _write_json(output / "provenance.json", provenance)
         return 1

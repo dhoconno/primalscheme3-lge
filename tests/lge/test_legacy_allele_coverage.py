@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
@@ -23,6 +24,14 @@ from primalscheme3.panel.coverage_types import (
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "score_legacy_allele_coverage.py"
+
+
+def _script_module():
+    spec = importlib.util.spec_from_file_location("legacy_allele_coverage_under_test", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _sha256(path: Path) -> str:
@@ -64,7 +73,9 @@ def _run(
 
 
 def _production_summary() -> object:
-    rows = tuple(tuple(row) for row in ("AA--CCNGTT", "AA--CCNGTT", "AATTCCNGTT"))
+    rows = tuple(
+        tuple(row) for row in ("AA---CCNGTT", "AA---CCNGTT", "AAT-TCCNGTT")
+    )
     ref_columns = tuple(i for i, base in enumerate(rows[0]) if base != "-")
     mapping = tuple(
         ref_columns.index(i) if i in ref_columns else None for i in range(len(rows[0]))
@@ -81,8 +92,8 @@ def _production_summary() -> object:
         ref_columns + (ref_columns[-1] + 1,),
     )
     forward = OligoSite(target.id, "AA", "+", 2, (0, 2))
-    reverse = OligoSite(target.id, "AA", "-", 8, (6, 8))
-    family = CandidateFamily(target.id, (2, 8), (forward.id,), (reverse.id,))
+    reverse = OligoSite(target.id, "AA", "-", 9, (6, 8))
+    family = CandidateFamily(target.id, (2, 9), (forward.id,), (reverse.id,))
     config = SelectionConfiguration(
         target.id,
         family.id,
@@ -100,13 +111,32 @@ def _production_summary() -> object:
     )
 
 
+def _production_empty_summary() -> object:
+    rows = (tuple("AAAATTTT"),)
+    target = Target(
+        "target-empty",
+        0,
+        0,
+        ("ref",),
+        rows,
+        "AAAATTTT",
+        8,
+        tuple(range(8)),
+        tuple(range(9)),
+    )
+    catalog = VariantCatalog((target,), canonical_observations(target), (), ())
+    return allele_summary(
+        catalog, (), ConfigurationLedger(catalog.semantic_digest, ()), goal=0.95
+    )
+
+
 def test_scores_all_variants_with_production_metric_and_complete_provenance(tmp_path):
     msa = _fasta(
         tmp_path / "target.fasta",
         [
-            ("ref-chrom", "AA--CCNGTT"),
-            ("duplicate", "AA--CCNGTT"),
-            ("insertion", "AATTCCNGTT"),
+            ("ref-chrom", "AA---CCNGTT"),
+            ("duplicate", "AA---CCNGTT"),
+            ("insertion", "AAT-TCCNGTT"),
         ],
     )
     bed = _bed(
@@ -360,3 +390,74 @@ def test_rejects_malformed_amplicon_family_with_failure_provenance(tmp_path):
     assert provenance["status"] == "error"
     assert provenance["inputs"][0]["sha256"] == _sha256(msa)
     assert provenance["inputs"][1]["sha256"] == _sha256(bed)
+
+
+def test_header_only_empty_bed_reports_production_zero_coverage(tmp_path):
+    msa = _fasta(tmp_path / "target.fasta", [("ref", "AAAATTTT")])
+    bed = tmp_path / "primer.bed"
+    bed.write_text("# artic-bed-version v3.0\n# pc=PrimerCountInMSA\n")
+    output = tmp_path / "score"
+
+    completed = _run(output, [msa], bed)
+
+    assert completed.returncode == 0, completed.stderr
+    report = json.loads((output / "coverage.json").read_text())
+    production = _production_empty_summary()
+    assert report["valid"] is True
+    assert report["coverage"]["mean_coverage"] == production.mean_coverage == 0
+    assert report["coverage"]["classes"][0]["covered_count"] == 0
+    assert report["counts"]["primerRecords"] == 0
+    assert report["counts"]["ampliconFamilies"] == 0
+    assert report["pools"] == []
+    assert report["amplicons"] == []
+    provenance = json.loads((output / "provenance.json").read_text())
+    assert provenance["status"] == "success"
+    assert provenance["scientificReportValid"] is True
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "reason"),
+    [
+        ("inputsChangedDuringRun", "scientific inputs changed during execution"),
+        ("sourceChangedDuringRun", "scientific source changed during execution"),
+    ],
+)
+def test_changed_inputs_or_source_invalidate_report_and_fail_closed(
+    tmp_path, monkeypatch, capsys, changed_field, reason
+):
+    msa = _fasta(tmp_path / "target.fasta", [("ref", "AAAATTTT")])
+    bed = _bed(
+        tmp_path / "primer.bed",
+        [
+            ("ref", 0, 2, "amp_1_LEFT_1", 1, "+", "AA", "pc=1"),
+            ("ref", 6, 8, "amp_1_RIGHT_1", 1, "-", "AA", "pc=1"),
+        ],
+    )
+    output = tmp_path / "score"
+    module = _script_module()
+    actual_provenance = module._provenance
+
+    def injected_change(**kwargs):
+        receipt = actual_provenance(**kwargs)
+        receipt[changed_field] = True
+        return receipt
+
+    monkeypatch.setattr(module, "_provenance", injected_change)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--msa", str(msa), "--bed", str(bed), "--output", str(output)],
+    )
+
+    assert module.main() == 1
+
+    assert reason in capsys.readouterr().err
+    report = json.loads((output / "coverage.json").read_text())
+    assert report["valid"] is False
+    assert reason in report["invalidReasons"]
+    provenance = json.loads((output / "provenance.json").read_text())
+    assert provenance["status"] == "error"
+    assert provenance["exitStatus"] == 1
+    assert provenance["scientificReportValid"] is False
+    assert provenance["command"]["workingDirectory"] == str(tmp_path)
