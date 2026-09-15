@@ -589,10 +589,12 @@ class Test_MPFDigest(unittest.TestCase):
             "CCAATGGTGCAAAAGGTATAATCA-TAATGTCCAATGGTGCAAAAGGTATAATCATTAATGT",
             "CCAATGGTGCAAAAGGTATAATCATTAATGTCCAATGGTGCAAAAGGTATAATCATTAATGT",
         ]
-        result = f_digest_index(self.create_array(seqs), self.config, 24, 0)
+        # The gap is column 24; forward digestion takes an exclusive end.
+        self.assertEqual(seqs[0][24], "-")
+        result = f_digest_index(self.create_array(seqs), self.config, 25, 0)
 
         # The Expected Sequence
-        expected = (24, DIGESTION_ERROR.GAP_ON_SET_BASE)
+        expected = (25, DIGESTION_ERROR.GAP_ON_SET_BASE)
         self.assertEqual(result, expected)  # type: ignore
 
     def test_f_digest_index_walktofar(self):
