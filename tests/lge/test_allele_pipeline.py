@@ -193,3 +193,47 @@ def test_pipeline_reuse_skips_discovery_and_preserves_origin_history(
     result = query_allele_history(reused, stage="discovery", limit=2)
     assert "origin_discovery" in result
     assert not result["origin_discovery"]["scope"]["current_decisions"]
+
+
+def test_real_multitarget_design_selects_and_audits_nonempty_panel(tmp_path):
+    """Exercise real discovery, scoring and serialization together, without mocks."""
+    import random
+
+    from primalscheme3.panel.allele_inspection import audit_allele_bundle
+
+    inputs = []
+    for index in range(2):
+        rng = random.Random(index)
+        sequence = "".join(rng.choice("ACGT") for _ in range(300))
+        path = tmp_path / f"target-{index}.fasta"
+        path.write_text(
+            f">reference-{index}\n{sequence}\n>duplicate-{index}\n{sequence}\n"
+        )
+        inputs.append(path)
+    out = tmp_path / "nonempty"
+    config = Config(
+        selection_algorithm="allele-coverage",
+        amplicon_size=200,
+        amplicon_size_min=150,
+        amplicon_size_max=250,
+        ncores=1,
+        optimizer_starts=1,
+        optimizer_repair_rounds=0,
+        optimizer_time_limit=10.0,
+    )
+    panelcreate(
+        inputs,
+        out,
+        config,
+        None,
+        mode=PanelRunModes.EQUAL,
+        executed_argv=["primalscheme3", "panel-create"],
+    )
+    coverage = json.loads((out / "row-coverage.json").read_text())
+    assert coverage["mean_coverage"] > 0
+    assert len(coverage["classes"]) == 2
+    assert any(
+        not line.startswith("#")
+        for line in (out / "primer.bed").read_text().splitlines()
+    )
+    assert audit_allele_bundle(out)["valid"]
