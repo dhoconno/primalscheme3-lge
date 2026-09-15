@@ -81,9 +81,13 @@ class StageSnapshot(ScientificRecord):
     evidence_digest: str
     assessments_digest: str
     events_digest: str
+    evidence_count: int = 0
+    assessments_count: int = 0
+    events_count: int = 0
     id: str = field(init=False)
     _identity_fields = ('stage_id', 'completeness', 'prior_snapshot_id', 'dispositions', 'catalog_digest',
-                        'ledger_digest', 'evidence_digest', 'assessments_digest', 'events_digest')
+                        'ledger_digest', 'evidence_digest', 'assessments_digest', 'events_digest',
+                        'evidence_count', 'assessments_count', 'events_count')
 
     def __post_init__(self):
         if self.completeness not in ('complete', 'incomplete', 'failed'):
@@ -137,6 +141,36 @@ class CoverageHistory:
             prior = self._indexes['snapshots'].get(record.prior_snapshot_id)
             if prior is None or prior.completeness != 'complete':
                 raise ValueError('snapshot inheritance requires a complete prior snapshot')
+        if name == 'snapshots':
+            self._validate_checkpoint(record)
+
+    def _validate_checkpoint(self, snapshot):
+        prefixes = {}
+        for name in ('evidence', 'assessments', 'events'):
+            count = getattr(snapshot, name + '_count')
+            if type(count) is not int or not 0 <= count <= len(self._records[name]):
+                raise ValueError('checkpoint committed prefix is missing: ' + name)
+            prefix = tuple(self._records[name][:count])
+            if semantic_id('history-' + name, prefix) != getattr(snapshot, name + '_digest'):
+                raise ValueError('checkpoint committed prefix hash mismatch: ' + name)
+            prefixes[name] = prefix
+        evidence_ids = {r.id for r in prefixes['evidence']}
+        assessment_ids = {r.id for r in prefixes['assessments']}
+        if any(not set(a.evidence_ids) <= evidence_ids for a in prefixes['assessments']):
+            raise ValueError('checkpoint assessment references uncommitted evidence')
+        if any(not set(e.assessment_ids) <= assessment_ids for e in prefixes['events']):
+            raise ValueError('checkpoint event references uncommitted assessment')
+        prior = self._indexes['snapshots'].get(snapshot.prior_snapshot_id)
+        inherited = self._resolved_dispositions(prior) if prior is not None else {}
+        if prior is not None and any(getattr(snapshot, name + '_count') < getattr(prior, name + '_count')
+                                     for name in ('evidence', 'assessments', 'events')):
+            raise ValueError('checkpoint prefixes precede inherited snapshot')
+        if snapshot.completeness == 'complete':
+            seen = {entity for event in prefixes['events'] for entity in event.entity_ids}
+            touched = {entity for event in prefixes['events'][prior.events_count if prior else 0:]
+                       for entity in event.entity_ids}
+            if not seen <= (set(snapshot.dispositions) | set(inherited)) or not touched <= set(snapshot.dispositions):
+                raise ValueError('complete snapshot requires fresh dispositions for touched entities')
 
     def _remember(self, name, record):
         self._records[name].append(record)
@@ -207,7 +241,8 @@ class CoverageHistory:
         return self._append('snapshots', StageSnapshot(stage_id, completeness, prior_snapshot_id,
             dispositions, catalog_digest, ledger_digest,
             semantic_id('history-evidence', self.evidence), semantic_id('history-assessments', self.assessments),
-            semantic_id('history-events', self.events)))
+            semantic_id('history-events', self.events), len(self._records['evidence']),
+            len(self._records['assessments']), len(self._records['events'])))
 
     def query(self, *, entity_id=None, pool=None, stage_id=None, profile_id=None, include_lineage=False):
         assessments = tuple(a for a in self.assessments

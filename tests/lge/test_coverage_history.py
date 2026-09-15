@@ -75,3 +75,41 @@ def test_evidence_reuse_uses_complete_dependency_and_corrupt_tail_fails(tmp_path
     with (tmp_path/'events.jsonl').open('a') as handle: handle.write('{broken')
     with pytest.raises(ValueError, match='incomplete|corrupt'):
         a.CoverageHistory(tmp_path, run_id='run')
+
+
+@pytest.mark.parametrize('stream', ['evidence', 'assessments', 'events'])
+def test_reload_rejects_missing_committed_complete_line(tmp_path, stream):
+    a = api()
+    h = a.CoverageHistory(tmp_path, run_id='run')
+    h.record_evidence(entity_ids=('site',), measurement='tm', dependency_key={'kernel':'v1'}, values={'tm':60}, status='measured')
+    h.assess(stage_id='strict',entity_ids=('site',),pool=0,context_digest='pool',profile_id='normal',
+             kernel_versions={},thresholds={},check_name='tm',outcome='pass',reason='accepted')
+    h.emit(stage_id='strict',kind='generated',entity_ids=('site',))
+    h.complete_stage(stage_id='strict',dispositions={'site':'feasible-but-not-selected'},catalog_digest='c',ledger_digest='l')
+    (tmp_path/(stream+'.jsonl')).write_text('')
+    with pytest.raises(ValueError,match='checkpoint|prefix|committed'):
+        a.CoverageHistory(tmp_path,run_id='run')
+
+
+def test_two_snapshot_prefixes_reload_after_later_appends(tmp_path):
+    a = api()
+    h = a.CoverageHistory(tmp_path,run_id='run')
+    h.emit(stage_id='strict',kind='generated',entity_ids=('first',))
+    first = h.complete_stage(stage_id='strict',dispositions={'first':'selected-strict'},catalog_digest='c',ledger_digest='l')
+    h.emit(stage_id='salvage',kind='generated',entity_ids=('second',))
+    second = h.complete_stage(stage_id='salvage',dispositions={'second':'selected-salvage'},catalog_digest='c',ledger_digest='l',prior_snapshot_id=first.id)
+    loaded = a.CoverageHistory(tmp_path,run_id='run')
+    assert loaded.snapshots == (first,second)
+    assert loaded.last_complete_stage == second
+
+
+@pytest.mark.parametrize('kind', ['pruned', 'reconsidered', 'moved'])
+def test_touched_entities_require_fresh_dispositions(tmp_path,kind):
+    h = api().CoverageHistory(tmp_path,run_id='run')
+    h.emit(stage_id='strict',kind='generated',entity_ids=('site',))
+    first = h.complete_stage(stage_id='strict',dispositions={'site':'selected-strict'},catalog_digest='c',ledger_digest='l')
+    h.emit(stage_id='salvage',kind=kind,entity_ids=('site',))
+    with pytest.raises(ValueError,match='disposition'):
+        h.complete_stage(stage_id='salvage',dispositions={},catalog_digest='c',ledger_digest='l',prior_snapshot_id=first.id)
+    fresh = h.complete_stage(stage_id='salvage',dispositions={'site':'superseded'},catalog_digest='c',ledger_digest='l',prior_snapshot_id=first.id)
+    assert fresh.dispositions['site'] == 'superseded'

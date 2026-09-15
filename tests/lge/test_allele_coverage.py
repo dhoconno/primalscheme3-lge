@@ -141,3 +141,29 @@ def test_partial_overlapping_interiors_form_union_and_threshold_counts():
     assert a.allele_summary(cat,assigned[:1],ledger,goal=.8).mean_coverage == .5
     with pytest.raises(ValueError,match='duplicate'):
         a.allele_summary(cat, assigned+assigned[:1],ledger,goal=.8)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('observed_positions', [2, 3, 4, 5]),
+    ('alignment_to_row', [7, 6, 5, 4, 3, 2, 1, 0]),
+    ('row_to_alignment', [7, 6, 5, 4, 3, 2, 1, 0]),
+    ('multiplicity', 0), ('row_ids', []),
+])
+def test_observation_rejects_incoherent_derived_payload(field, value):
+    catalog, _, _ = catalog_and_configs()
+    payload = catalog.to_dict()
+    payload['observations'][0][field] = value
+    with pytest.raises(ValueError):
+        types.VariantCatalog.from_dict(payload)
+
+
+def test_nested_records_reject_stale_semantic_ids():
+    catalog, _, config = catalog_and_configs()
+    payload = catalog.to_dict()
+    payload['sites'][0]['id'] = 'forged'
+    with pytest.raises(ValueError, match='identity'):
+        types.VariantCatalog.from_dict(payload)
+    ledger = types.ConfigurationLedger(catalog.semantic_digest, (config,)).to_dict()
+    ledger['configurations'][0]['id'] = 'forged'
+    with pytest.raises(ValueError, match='identity'):
+        types.ConfigurationLedger.from_dict(ledger)

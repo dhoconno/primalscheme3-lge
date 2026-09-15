@@ -163,8 +163,11 @@ def _decode(annotation: Any, value: Any) -> Any:
                      for i, v in enumerate(value))
     if isinstance(annotation, type) and is_dataclass(annotation):
         hints = get_type_hints(annotation)
-        return annotation(**{f.name: _decode(hints[f.name], value[f.name])
-                             for f in fields(annotation) if f.init and f.name in value})
+        result = annotation(**{f.name: _decode(hints[f.name], value[f.name])
+                               for f in fields(annotation) if f.init and f.name in value})
+        if isinstance(result, ScientificRecord) and 'id' in value and result.id != value['id']:
+            raise ValueError('record identity does not match payload')
+        return result
     return _freeze(value)
 
 
@@ -201,6 +204,27 @@ class ObservedAllele(ScientificRecord):
     multiplicity: int
     id: str = field(init=False)
     _identity_fields = ('target_id', 'cells')
+
+    def __post_init__(self):
+        cells = tuple(cell.upper() for cell in self.cells)
+        if any(cell not in ('', '-', *'ACGTRYSWKMBDHVN') for cell in cells):
+            raise ValueError('invalid aligned observation cell')
+        row_to_alignment = tuple(i for i, cell in enumerate(cells) if cell not in ('', '-'))
+        positions = {column: index for index, column in enumerate(row_to_alignment)}
+        alignment_to_row = tuple(positions.get(i) for i in range(len(cells)))
+        observed = tuple(index for index, column in enumerate(row_to_alignment) if cells[column] in 'ACGT')
+        for name, expected in (('row_to_alignment', row_to_alignment),
+                               ('alignment_to_row', alignment_to_row),
+                               ('observed_positions', observed)):
+            if tuple(getattr(self, name)) != expected:
+                raise ValueError('observation ' + name + ' is inconsistent with cells')
+        if (not self.row_ids or any(not isinstance(x, str) or not x for x in self.row_ids)
+                or len(set(self.row_ids)) != len(self.row_ids)
+                or type(self.multiplicity) is not int or self.multiplicity != len(self.row_ids)):
+            raise ValueError('observation aliases/multiplicity are inconsistent')
+        object.__setattr__(self, 'cells', cells)
+        object.__setattr__(self, 'row_ids', tuple(sorted(self.row_ids)))
+        super().__post_init__()
 
 
 @dataclass(frozen=True)
