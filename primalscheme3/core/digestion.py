@@ -949,14 +949,96 @@ def variant_digest_index(array, config, direction, index, *, expansion_limit=256
                                     reason='first-compatible-length-stop',
                                     unexamined_length_interval=(length + 1, config.primer_size_max + 1)))
                 break
-    # Frequency is a per-sequence enumeration policy, never an error quorum.
-    counts = Counter((r['sequence'], r['length']) for r in records if r['sequence'])
-    for record in records:
-        if record['sequence']:
-            frequency = counts[record['sequence'], record['length']] / len(array)
-            passes = frequency >= config.min_base_freq
-            record['frequency'] = frequency
-            record['checks']['minimum-frequency'] = dict(value=frequency, minimum=config.min_base_freq,
-                                                         outcome='pass' if passes else 'fail')
-            record['accepted'] &= passes
+    _weight_variant_frequency(records, array, config, direction, index, expansion_limit)
     return records
+
+
+VARIANT_FREQUENCY_POLICY = 'observed-only-anchored-length-row-mass/v2'
+
+
+def _weight_variant_frequency(records, array, config, direction, index, expansion_limit):
+    """Frequency is conditional on an original anchored footprint length.
+
+    Each available row contributes at most one unit across concrete ambiguity
+    expansions *within that length cohort*. Distinct lengths are independent:
+    extra diagnostic records never increase any one candidate's frequency.
+    Templates are reconstructed from the original rows, including rows whose
+    discovery stopped at an earlier compatible length. Missing terminal cells
+    exclude a row from that length's denominator. Invalid/unevaluable or capped
+    ambiguity contributes zero concrete numerator and one available denominator.
+    """
+    from math import prod
+    from primalscheme3.core.config import ALL_DNA_WITH_N
+
+    lengths = sorted({len(r['sequence']) for r in records if r['sequence']})
+    templates = {length: [] for length in lengths}
+    maximum = max(lengths, default=0)
+    for row_index, row in enumerate(array):
+        cursor = index - 1 if direction == 'f' else index
+        step = -1 if direction == 'f' else 1
+        selected, walked, status = [], 0, 'available'
+        for length in range(1, maximum + 1):
+            while status == 'available':
+                if not 0 <= cursor < len(row) or row[cursor] == '':
+                    status = 'terminal-unavailable'
+                    break
+                if walked >= config.primer_max_walk:
+                    status = 'maximum-alignment-walk'
+                    break
+                cell = str(row[cursor]).upper()
+                column = cursor
+                cursor += step
+                walked += 1
+                if cell == '-':
+                    continue
+                selected.append((column, cell))
+                break
+            if length not in templates:
+                continue
+            cells = tuple(cell for _, cell in sorted(selected))
+            count = (prod(len(ALL_DNA_WITH_N[cell]) for cell in cells)
+                     if status == 'available' and all(cell in ALL_DNA_WITH_N for cell in cells) else None)
+            reason = status
+            if status == 'available' and count is None:
+                reason = 'invalid-base'
+            elif count is not None and count > expansion_limit:
+                reason = 'ambiguous-expansion-limit'
+            templates[length].append((row_index, cells, count, reason))
+
+    by_sequence = {}
+    for record in records:
+        sequence = record['sequence']
+        if not sequence:
+            record['row_frequency_weight'] = 0.0
+            record['frequency_evidence'] = dict(policy=VARIANT_FREQUENCY_POLICY,
+                                                status='not-evaluated-no-concrete-sequence')
+            continue
+        if sequence not in by_sequence:
+            cohort = templates[len(sequence)]
+            expected = reverse_complement(sequence) if direction == 'r' else sequence
+            excluded, unallocated, weights = [], [], []
+            for row_index, cells, count, status in cohort:
+                if status == 'terminal-unavailable':
+                    excluded.append(row_index)
+                elif status != 'available':
+                    unallocated.append(row_index)
+                elif all(base in ALL_DNA_WITH_N[cell] for base, cell in zip(expected, cells, strict=True)):
+                    weights.append((row_index, 1.0 / count))
+            numerator = sum(weight for _, weight in weights)
+            denominator = len(array) - len(excluded)
+            evidence = dict(policy=VARIANT_FREQUENCY_POLICY, footprint_length=len(sequence),
+                            numerator=numerator, denominator=denominator, row_weights=tuple(weights),
+                            excluded_terminal_row_indexes=tuple(excluded),
+                            unallocated_row_indexes=tuple(unallocated),
+                            row_alternative_counts=tuple((i, count) for i, _, count, _ in cohort),
+                            row_statuses=tuple((i, status) for i, _, _, status in cohort))
+            by_sequence[sequence] = evidence
+        evidence = by_sequence[sequence]
+        frequency = evidence['numerator'] / evidence['denominator'] if evidence['denominator'] else 0.0
+        record['row_frequency_weight'] = dict(evidence['row_weights']).get(record['row_index'], 0.0)
+        record['frequency_evidence'] = evidence
+        record['frequency'] = frequency
+        passes = frequency >= config.min_base_freq
+        record['checks']['minimum-frequency'] = dict(value=frequency, minimum=config.min_base_freq,
+                                                     outcome='pass' if passes else 'fail')
+        record['accepted'] &= passes

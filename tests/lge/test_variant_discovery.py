@@ -213,3 +213,92 @@ def test_numeric_chemistry_evidence_is_shared_across_sites_and_profiles():
     assert len(evidence) == 1
     assert all(evidence[0].id in s.intrinsic_evidence_ids for s in shared_sites)
     assert evidence[0].entity_ids == (shared_sites[0].species_id,)
+
+
+def frequency_config(minimum=.75):
+    config = Config(min_base_freq=minimum)
+    config.primer_size_min = config.primer_size_max = len(SHARED)
+    return config
+
+
+def test_frequency_excludes_terminal_missing_rows_at_fixed_footprint():
+    array = np.array([list(SHARED), [''] * len(SHARED)])
+    records, _ = discover(array, frequency_config(), indexes=([len(SHARED)], []), variant_mode=True)
+    shared = next(r for r in records if r['sequence'] == SHARED)
+    assert shared['accepted']
+    assert shared['frequency'] == 1
+    assert shared['frequency_evidence']['numerator'] == 1
+    assert shared['frequency_evidence']['denominator'] == 1
+    assert shared['frequency_evidence']['excluded_terminal_row_indexes'] == (1,)
+
+
+def test_frequency_apportions_ambiguous_row_at_fixed_footprint():
+    array = np.array([list(SHARED[:-1] + 'N')])
+    records, _ = discover(array, frequency_config(), indexes=([len(SHARED)], []), variant_mode=True)
+    alternatives = [r for r in records if r['sequence']]
+    assert len(alternatives) == 4
+    assert all(r['frequency'] == .25 and not r['accepted'] for r in alternatives)
+    assert all(r['support'] == 'unknown' for r in alternatives)
+    assert sum(r['row_frequency_weight'] for r in alternatives) == 1
+
+
+def test_frequency_shared_alternatives_sum_fractional_row_weights():
+    array = np.array([list(SHARED), list(SHARED[:-1] + 'N'), [''] * len(SHARED)])
+    records, _ = discover(array, frequency_config(), indexes=([len(SHARED)], []), variant_mode=True)
+    shared_records = [r for r in records if r['sequence'] == SHARED]
+    assert all(r['frequency'] == .625 and not r['accepted'] for r in shared_records)
+    for r in shared_records:
+        evidence = r['frequency_evidence']
+        assert evidence['numerator'] == 1.25 and evidence['denominator'] == 2
+        assert evidence['row_weights'] == ((0, 1.0), (1, .25))
+        assert evidence['policy'] == 'observed-only-anchored-length-row-mass/v2'
+
+
+def test_failed_prefixes_and_exhaustive_lengths_do_not_multiply_row_mass():
+    array = np.array([list(SHARED), list(SHARED[:-1] + 'N')])
+    by_mode = {}
+    for mode in ('first-compatible', 'all'):
+        records, _ = discover(array, Config(min_base_freq=.75), indexes=([len(SHARED)], []),
+                              variant_mode=True, discovery_length_mode=mode)
+        by_mode[mode] = {r['sequence']: r['frequency_evidence'] for r in records if r['sequence']}
+        for row in (0, 1):
+            for length in {r['length'] for r in records if r['sequence']}:
+                mass = sum(r['row_frequency_weight'] for r in records
+                           if r['sequence'] and r['row_index'] == row and r['length'] == length)
+                assert 0 <= mass <= 1
+    assert len(by_mode['all']) > len(by_mode['first-compatible'])
+    for sequence, evidence in by_mode['first-compatible'].items():
+        assert evidence == by_mode['all'][sequence]
+    # Exhaustive later compatible sequence has full reconstructed support even
+    # though first-compatible discovery stopped that row at a shorter length.
+    assert by_mode['all'][SHARED]['numerator'] == 1.25
+    assert by_mode['all'][SHARED]['denominator'] == 2
+
+
+def test_capped_ambiguous_row_retains_denominator_without_invented_support():
+    array = np.array([list(SHARED), list('N' * len(SHARED))])
+    records, _ = discover(array, frequency_config(), indexes=([len(SHARED)], []), variant_mode=True)
+    shared = next(r for r in records if r['sequence'] == SHARED)
+    assert shared['frequency'] == .5 and not shared['accepted']
+    assert shared['frequency_evidence']['denominator'] == 2
+    assert shared['frequency_evidence']['unallocated_row_indexes'] == (1,)
+    assert any(r['reason'] == 'ambiguous-expansion-limit' for r in records)
+
+
+def test_frequency_denominator_is_footprint_specific_and_reverse_aware():
+    from primalscheme3.core.seq_functions import reverse_complement
+    row = list(reverse_complement(SHARED))
+    partial = row.copy()
+    partial[-1] = ''
+    config = Config(min_base_freq=.75)
+    config.primer_size_min = len(SHARED) - 1
+    config.primer_size_max = len(SHARED)
+    records, _ = discover(np.array([row, partial]), config, indexes=([], [0]),
+                          variant_mode=True, discovery_length_mode='all')
+    full = next(r for r in records if r['sequence'] == SHARED)
+    assert full['frequency'] == 1 and full['accepted']
+    assert full['frequency_evidence']['denominator'] == 1
+    assert full['frequency_evidence']['excluded_terminal_row_indexes'] == (1,)
+    short = next(r for r in records if r['sequence'] and r['length'] == len(SHARED) - 1)
+    assert short['frequency'] == 1
+    assert short['frequency_evidence']['denominator'] == 2

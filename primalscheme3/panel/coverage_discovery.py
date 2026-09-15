@@ -5,6 +5,7 @@ from dataclasses import replace
 from importlib.metadata import version
 import numpy as np
 from primalscheme3.core.parallel_discovery import discover
+from primalscheme3.core.digestion import VARIANT_FREQUENCY_POLICY
 from primalscheme3.core.variant_thermo import _FIELDS
 from primalscheme3.panel.allele_coverage import canonical_observations
 from primalscheme3.panel.coverage_types import (
@@ -82,6 +83,7 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
     resolved = {'profiles': {name: {k: getattr(p, k) for k in _FIELDS}
                              for name, p in sorted(profiles.items())},
                 'minimum_frequency': {name: p.min_base_freq for name, p in sorted(profiles.items())},
+                'frequency_policy': VARIANT_FREQUENCY_POLICY,
                 'maximum_alignment_walk': {name: p.primer_max_walk for name, p in sorted(profiles.items())},
                 'enumeration': 'row-anchor-profile-length/v2', 'discovery_length_mode': length_mode,
                 'ambiguous_expansion_limit': 256,
