@@ -173,9 +173,12 @@ class _State:
             for t in sorted(self.catalog.targets, key=lambda t: t.id)
         ]
         deficits = [
-            max(0.0, self.options.coverage_target - f) / self.options.coverage_target
-            if self.options.coverage_target
-            else 0.0
+            (
+                max(0.0, self.options.coverage_target - f)
+                / self.options.coverage_target
+                if self.options.coverage_target
+                else 0.0
+            )
             for f in fractions
         ]
         burdens = [len(pool) for pool in self.oligos]
@@ -209,12 +212,12 @@ class _State:
                 "intervals": [list(interval) for interval in self.coverage[t.id]],
                 "covered_bases": _length(self.coverage[t.id]),
                 "coverage_fraction": self.fraction(t.id),
-                "normalized_shortfall": max(
-                    0.0, self.options.coverage_target - self.fraction(t.id)
-                )
-                / self.options.coverage_target
-                if self.options.coverage_target
-                else 0.0,
+                "normalized_shortfall": (
+                    max(0.0, self.options.coverage_target - self.fraction(t.id))
+                    / self.options.coverage_target
+                    if self.options.coverage_target
+                    else 0.0
+                ),
             }
             for t in sorted(self.catalog.targets, key=lambda t: t.id)
         }
@@ -224,10 +227,38 @@ class _TimeLimit(Exception):
     pass
 
 
+class _Cancelled(Exception):
+    pass
+
+
 class _Search:
-    def __init__(self, catalog, profile, options, oracle, clock):
+    def __init__(
+        self,
+        catalog,
+        profile,
+        options,
+        oracle,
+        clock,
+        *,
+        state_factory=None,
+        candidate_source=None,
+        candidate_filter=None,
+        aggregate_guard=None,
+        record_hook=None,
+        neighborhood_hook=None,
+        cancelled=None,
+        limits=None,
+    ):
         self.catalog, self.profile, self.options = catalog, profile, options
         self.oracle, self.clock = oracle, clock
+        self.state_factory = state_factory
+        self.candidate_source = candidate_source
+        self.candidate_filter = candidate_filter
+        self.aggregate_guard = aggregate_guard
+        self.record_hook = record_hook
+        self.neighborhood_hook = neighborhood_hook
+        self.cancelled = cancelled
+        self.limits = dict(LIMITS) | (limits or {})
         self.ids = tuple(sorted(catalog.candidate_by_id))
         self.valid_cache = {}
         self.conflict_cache = {}
@@ -256,9 +287,21 @@ class _Search:
         self.repairs_accepted = 0
 
     def state(self, assignments=()):
+        if self.state_factory is not None:
+            return self.state_factory(assignments)
         return _State(self.catalog, self.profile, self.options, assignments)
 
+    def refresh(self, state, phase):
+        if self.candidate_source is None:
+            return False
+        self.tick()
+        changed = self.candidate_source(self, state, phase)
+        self.ids = tuple(sorted(self.catalog.candidate_by_id))
+        return changed
+
     def tick(self):
+        if self.deadline < math.inf and self.cancelled is not None and self.cancelled():
+            raise _Cancelled
         if self.clock() >= self.deadline:
             raise _TimeLimit
 
@@ -280,9 +323,12 @@ class _Search:
     def record(self, state, phase):
         key = state.key()
         if key < self.best_key:
+            previous = self.best
             self.best = _canonical(state.items())
             self.best_key = key
             self.history.append({"phase": phase, "objective": list(key[:-1])})
+            if self.record_hook is not None:
+                self.record_hook(previous, self.best, phase)
             return True
         return False
 
@@ -303,6 +349,10 @@ class _Search:
             and not any(
                 self.conflict(candidate.id, other)
                 for other in sorted(state.pools[pool])
+            )
+            and (
+                self.aggregate_guard is None
+                or self.aggregate_guard(state, candidate, pool)
             )
         )
 
@@ -337,6 +387,16 @@ class _Search:
                                 "reason": "pair_conflict",
                             }
                         )
+                if self.aggregate_guard is not None and not self.aggregate_guard(
+                    state, candidate, pool
+                ):
+                    violations.append(
+                        {
+                            "candidate_id": ident,
+                            "pool": pool,
+                            "reason": "aggregate-pool",
+                        }
+                    )
                 state.add(candidate, pool)
         return {
             "scope": "abstract-oracle",
@@ -352,14 +412,19 @@ class _Search:
             if (
                 ident not in state.assignments
                 and self.valid_cache.get(ident) is not False
+                and (self.candidate_filter is None or self.candidate_filter(ident))
             ):
                 queues[self.catalog.candidate_by_id[ident].target_id].append(ident)
         for values in queues.values():
             if start < 2:
                 values.sort(
                     key=lambda ident: (
-                        -_length(
-                            (state.interval(self.catalog.candidate_by_id[ident]),)
+                        (
+                            -state.queue_weight(self.catalog.candidate_by_id[ident])
+                            if hasattr(state, "queue_weight")
+                            else -_length(
+                                (state.interval(self.catalog.candidate_by_id[ident]),)
+                            )
                         ),
                         ident,
                     )
@@ -371,9 +436,10 @@ class _Search:
     def fill(self, state, start, phase):
         self.tick()
         self.work["constructions"] += 1
+        self.refresh(state, phase)
         queues, priority = self.queues(state, start)
         positions = {target: 0 for target in queues}
-        for _ in range(LIMITS["construction_candidate_attempts"]):
+        for _ in range(self.limits["construction_candidate_attempts"]):
             self.tick()
             active = [
                 target
@@ -381,6 +447,10 @@ class _Search:
                 if positions[target] < len(values)
             ]
             if not active:
+                if self.refresh(state, phase):
+                    queues, priority = self.queues(state, start)
+                    positions = {target: 0 for target in queues}
+                    continue
                 return
             active.sort(
                 key=lambda target: (
@@ -393,13 +463,13 @@ class _Search:
             # lose their frontier to a large catalogue from a single target.
             frontier = []
             depth = 0
-            while len(frontier) < LIMITS["frontier_candidates"]:
+            while len(frontier) < self.limits["frontier_candidates"]:
                 before = len(frontier)
                 for target in active:
                     index = positions[target] + depth
                     if index < len(queues[target]):
                         frontier.append(queues[target][index])
-                        if len(frontier) == LIMITS["frontier_candidates"]:
+                        if len(frontier) == self.limits["frontier_candidates"]:
                             break
                 if len(frontier) == before:
                     break
@@ -455,7 +525,7 @@ class _Search:
                 other
                 for other in frontier
                 if other != ident and other not in state.assignments
-            ][: LIMITS["pool_lookahead_candidates"]]
+            ][: self.limits["pool_lookahead_candidates"]]
             oligos = set(candidate.forward_oligos + candidate.reverse_oligos)
 
             def pool_rank(pool, ident=ident, lookahead=lookahead, oligos=oligos):
@@ -485,7 +555,7 @@ class _Search:
         for ident in sorted(a.candidate_id for a in self.best):
             for destination in [-1, *range(self.profile.n_pools)]:
                 self.tick()
-                if moves >= LIMITS["cleanup_moves_per_round"]:
+                if moves >= self.limits["cleanup_moves_per_round"]:
                     return
                 current = self.state(self.best)
                 if ident not in current.assignments:
@@ -506,6 +576,10 @@ class _Search:
                     self.repairs_accepted += 1
 
     def repair(self, start, round_index):
+        if self.neighborhood_hook is not None:
+            self.tick()
+            self.neighborhood_hook(self, self.state(self.best), start, round_index)
+            self.ids = tuple(sorted(self.catalog.candidate_by_id))
         self.cleanup(f"cleanup:{start}:{round_index}")
         initial = self.state(self.best)
         # Consider deficits first, but also fully covered targets: burden,
@@ -516,6 +590,7 @@ class _Search:
                 for ident in self.ids
                 if ident not in initial.assignments
                 and self.valid_cache.get(ident) is not False
+                and (self.candidate_filter is None or self.candidate_filter(ident))
             ),
             key=lambda ident: (
                 initial.fraction(self.catalog.candidate_by_id[ident].target_id),
@@ -528,7 +603,7 @@ class _Search:
             self.tick()
             if any(a.candidate_id == ident for a in self.best):
                 continue
-            if probes >= LIMITS["repair_candidate_probes_per_round"]:
+            if probes >= self.limits["repair_candidate_probes_per_round"]:
                 self.work["repair_limit_hits"] += 1
                 break
             probes += 1
@@ -546,17 +621,18 @@ class _Search:
                     for other in sorted(current.pools[pool])
                     if self.conflict(ident, other)
                 )
-                if len(mandatory) > LIMITS["repair_removed_candidates"]:
+                if len(mandatory) > self.limits["repair_removed_candidates"]:
                     continue
                 optional = sorted(set(current.assignments) - set(mandatory))
                 for size in range(
-                    LIMITS["repair_removed_candidates"] - len(mandatory) + 1
+                    self.limits["repair_removed_candidates"] - len(mandatory) + 1
                 ):
                     for extra in combinations(optional, size):
                         self.tick()
                         if (
-                            neighborhoods >= LIMITS["repair_neighborhoods_per_round"]
-                            or trials >= LIMITS["repair_trials_per_round"]
+                            neighborhoods
+                            >= self.limits["repair_neighborhoods_per_round"]
+                            or trials >= self.limits["repair_trials_per_round"]
                         ):
                             self.work["repair_limit_hits"] += 1
                             return
@@ -577,7 +653,7 @@ class _Search:
                         ] + [-1]
                         for locations in product(destinations, repeat=len(removed)):
                             self.tick()
-                            if trials >= LIMITS["repair_trials_per_round"]:
+                            if trials >= self.limits["repair_trials_per_round"]:
                                 self.work["repair_limit_hits"] += 1
                                 return
                             trials += 1
@@ -686,9 +762,11 @@ def search_assignments(
             "construction": "deterministic-gain-first-under-current-rules",
             "construction_objective": baseline_construction,
         },
-        "baseline_objective": baseline_construction
-        if baseline_construction is not None
-        else baseline_vector,
+        "baseline_objective": (
+            baseline_construction
+            if baseline_construction is not None
+            else baseline_vector
+        ),
         "final_objective": list(state.vector()),
         "per_target": state.per_target(),
         "validation": validation,
