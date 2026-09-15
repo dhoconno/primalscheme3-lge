@@ -301,10 +301,13 @@ def _resolve_chromosomes(
         direct = _native_name(msa["headers"][0])
         row_map = row_maps.get(index)
         source_id = None
-        mapped = None
+        mapped_original = None
+        mapped_normalized = None
         if row_map is not None:
             source_id = row_map["value"]["inputID"]
-            mapped = _native_name(row_map["value"]["rows"][0]["originalHeader"])
+            first_mapped_row = row_map["value"]["rows"][0]
+            mapped_original = _native_name(first_mapped_row["originalHeader"])
+            mapped_normalized = _native_name(first_mapped_row["normalizedHeader"])
         else:
             source_ids = sorted(
                 identity
@@ -316,16 +319,17 @@ def _resolve_chromosomes(
                     f"{msa['path']}: multiple reporting labels match source path"
                 )
             source_id = source_ids[0] if source_ids else None
-        matches = {candidate for candidate in (direct, mapped) if candidate in bed_chromosomes}
+        mapped_aliases = {candidate for candidate in (mapped_original, mapped_normalized) if candidate is not None}
+        matches = {candidate for candidate in ({direct} | mapped_aliases) if candidate in bed_chromosomes}
         if len(matches) > 1:
             raise ValueError(
-                f"{msa['path']}: direct and explicit row-map chromosomes both occur in BED; mapping is ambiguous"
+                f"{msa['path']}: multiple direct or explicit row-map chromosome aliases occur in BED; mapping is ambiguous"
             )
         if matches:
             chromosome = next(iter(matches))
             evidence = "direct-first-header" if chromosome == direct else "explicit-row-map"
-        elif mapped is not None:
-            chromosome = mapped
+        elif mapped_original is not None:
+            chromosome = mapped_original
             evidence = "explicit-row-map"
         else:
             chromosome = direct
@@ -344,6 +348,7 @@ def _resolve_chromosomes(
                 "sourceOccurrenceID": source_id,
                 "rowMapPath": str(row_map["path"]) if row_map else None,
                 "rowMapFirstOriginalHeader": row_map["value"]["rows"][0]["originalHeader"] if row_map else None,
+                "rowMapFirstNormalizedHeader": row_map["value"]["rows"][0]["normalizedHeader"] if row_map else None,
                 "label": labels.get(source_id) if source_id else None,
             }
         )

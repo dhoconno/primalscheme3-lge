@@ -268,6 +268,86 @@ def test_explicit_row_map_and_labels_resolve_normalized_snapshot(tmp_path):
     }
 
 
+def test_explicit_row_map_resolves_normalized_bed_against_original_header_msa(tmp_path):
+    msa = _fasta(
+        tmp_path / "occurrence-a.fasta",
+        [("original-ref", "AAAATTTT"), ("other-ref", "AAAATTTT")],
+    )
+    bed = _bed(
+        tmp_path / "primer.bed",
+        [
+            ("input_occurrence_a_row_0", 0, 2, "legacy_1_LEFT_1", 2, "+", "AA", "pc=2"),
+            ("input_occurrence_a_row_0", 6, 8, "legacy_1_RIGHT_1", 2, "-", "AA", "pc=2"),
+        ],
+    )
+    row_map = tmp_path / "occurrence-a-row-map.json"
+    row_map.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "inputID": "occurrence-a",
+                "rows": [
+                    {
+                        "rowIndex": 0,
+                        "normalizedHeader": "input_occurrence_a_row_0",
+                        "originalHeader": "original-ref",
+                    },
+                    {
+                        "rowIndex": 1,
+                        "normalizedHeader": "input_occurrence_a_row_1",
+                        "originalHeader": "other-ref",
+                    },
+                ],
+            }
+        )
+    )
+
+    completed = _run(tmp_path / "score", [msa], bed, row_maps=[row_map])
+
+    assert completed.returncode == 0, completed.stderr
+    mapping = json.loads(
+        (tmp_path / "score" / "resolved-chromosome-maps.json").read_text()
+    )["mappings"][0]
+    assert mapping["chromosome"] == "input_occurrence_a_row_0"
+    assert mapping["mappingEvidence"] == "explicit-row-map"
+    assert mapping["rowMapFirstOriginalHeader"] == "original-ref"
+    assert mapping["rowMapFirstNormalizedHeader"] == "input_occurrence_a_row_0"
+
+
+def test_explicit_row_map_rejects_bed_with_both_header_aliases(tmp_path):
+    msa = _fasta(tmp_path / "occurrence-a.fasta", [("original-ref", "AAAATTTT")])
+    bed = _bed(
+        tmp_path / "primer.bed",
+        [
+            ("original_ref", 0, 2, "legacy_1_LEFT_1", 2, "+", "AA", "pc=2"),
+            ("original_ref", 6, 8, "legacy_1_RIGHT_1", 2, "-", "AA", "pc=2"),
+            ("input_occurrence_a_row_0", 0, 2, "legacy_2_LEFT_1", 2, "+", "AA", "pc=2"),
+            ("input_occurrence_a_row_0", 6, 8, "legacy_2_RIGHT_1", 2, "-", "AA", "pc=2"),
+        ],
+    )
+    row_map = tmp_path / "occurrence-a-row-map.json"
+    row_map.write_text(
+        json.dumps(
+            {
+                "schemaVersion": 1,
+                "inputID": "occurrence-a",
+                "rows": [
+                    {
+                        "rowIndex": 0,
+                        "normalizedHeader": "input_occurrence_a_row_0",
+                        "originalHeader": "original-ref",
+                    }
+                ],
+            }
+        )
+    )
+
+    completed = _run(tmp_path / "score", [msa], bed, row_maps=[row_map])
+
+    assert completed.returncode != 0
+    assert "row-map chromosome aliases occur in BED" in completed.stderr
+
+
 def test_reports_unknown_and_unavailable_binding_without_coverage_credit(tmp_path):
     msa = _fasta(
         tmp_path / "target.fasta",
