@@ -311,3 +311,80 @@ def test_preset_requires_explicit_bounds_and_rejects_unknown_preset():
         selection_algorithm="allele-coverage", amplicon_size=200, amplicon_size_min=150
     )
     assert config.amplicon_size_max == 220
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_primer_size_default_min",
+        "_primer_size_default_max",
+        "_primer_size_hgc_min",
+        "_primer_size_hgc_max",
+        "_primer_gc_default_min",
+        "_primer_gc_default_max",
+        "_primer_gc_hgc_min",
+        "_primer_gc_hgc_max",
+    ],
+)
+@pytest.mark.parametrize(
+    "source", ["direct", "saved", "saved-request", "internal-request"]
+)
+def test_private_preset_overrides_reject_without_silent_provenance_loss(name, source):
+    import json
+
+    values = kwargs() if source == "direct" else Config(**kwargs()).to_dict()
+    if source in ("direct", "saved"):
+        values[name] = 100
+    elif source == "saved-request":
+        saved = json.loads(values["allele_options_json"])
+        saved["requested_options"][name] = 100
+        values["allele_options_json"] = json.dumps(saved)
+    else:
+        values = kwargs(_allele_requested_options={name: 100})
+    with pytest.raises(ValueError, match="private.*" + name):
+        Config(**values)
+
+
+def test_private_keys_reject_before_none_filter_and_saved_resolved_filter():
+    import json
+
+    with pytest.raises(ValueError, match="private"):
+        Config(**kwargs(_primer_gc_hgc_max=None))
+    values = Config(**kwargs()).to_dict()
+    saved = json.loads(values["allele_options_json"])
+    saved["_primer_gc_hgc_max"] = 100
+    values["allele_options_json"] = json.dumps(saved)
+    with pytest.raises(ValueError, match="private"):
+        Config(**values)
+
+
+def test_legitimate_internal_requests_and_worker_metadata_preserve_complete_presets():
+    from primalscheme3.panel.coverage_discovery import discovery_profiles
+
+    config = Config(**kwargs(_allele_requested_options=kwargs()))
+    saved = config.to_dict() | {
+        "discovery_workers_by_target_profile": {
+            "target-1": {"normal": 1, "high-gc": 2}
+        },
+    }
+    restored = Config(**saved)
+    for current in (config, restored):
+        profiles = discovery_profiles(current)
+        assert (
+            profiles["normal"].primer_size_min,
+            profiles["normal"].primer_size_max,
+            profiles["normal"].primer_gc_min,
+            profiles["normal"].primer_gc_max,
+        ) == (19, 36, 30, 55)
+        assert (
+            profiles["high-gc"].primer_size_min,
+            profiles["high-gc"].primer_size_max,
+            profiles["high-gc"].primer_gc_min,
+            profiles["high-gc"].primer_gc_max,
+        ) == (17, 30, 40, 65)
+    assert (
+        options().from_config(restored).to_dict()
+        == options().from_config(config).to_dict()
+    )
+    # Execution counts are recomputed, not trusted from caller metadata.
+    assert restored.discovery_workers_by_target_profile == {}

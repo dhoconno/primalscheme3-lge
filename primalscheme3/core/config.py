@@ -208,6 +208,7 @@ class Config:
 
     def __init__(self, **kwargs: Any) -> None:
         self.discovery_workers_by_msa = {}
+        self.discovery_workers_by_target_profile = {}
         allele_options = None
         if kwargs.get("selection_algorithm", "legacy") != "allele-coverage":
             from primalscheme3.panel.allele_options import NEW_OPTION_NAMES
@@ -370,6 +371,7 @@ class Config:
                 "discovery_backend",
                 "discovery_core_count",
                 "discovery_workers_by_msa",
+                "discovery_workers_by_target_profile",
             }:
                 continue  # Computed from effective policy, never caller-controlled.
 

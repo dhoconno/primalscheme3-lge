@@ -256,15 +256,31 @@ class AlleleOptions:
 def resolve_allele_options(params):
     from primalscheme3.core.config import Config
 
+    def reject_private(values, *, allowed=()):
+        private = sorted(k for k in values if k.startswith("_") and k not in allowed)
+        if private:
+            raise ValueError(
+                "private allele configuration options are unsupported: "
+                + ", ".join(private)
+            )
+
+    # Check before filtering None or requested provenance: even a hidden preset
+    # override omitted from serialization must never reach Config.assign_kwargs.
+    reject_private(params, allowed=("_allele_requested_options",))
+    if params.get("_allele_requested_options") is not None:
+        reject_private(params["_allele_requested_options"])
+    if params.get("allele_requested_options_json"):
+        reject_private(json.loads(params["allele_requested_options_json"]))
     raw = {k: _plain(v) for k, v in params.items() if v is not None}
     known = (
-        set(dir(Config))
+        {name for name in dir(Config) if not name.startswith("_")}
         | {f.name for f in fields(AlleleOptions)}
         | {
             "allele_options_json",
             "allele_requested_options_json",
             "_allele_requested_options",
             "discovery_workers_by_msa",
+            "discovery_workers_by_target_profile",
             "mismatch_kmersize",
             "primer_size_min",
             "primer_size_max",
@@ -286,6 +302,7 @@ def resolve_allele_options(params):
     saved = raw.get("allele_options_json")
     if saved:
         saved_values = json.loads(saved)
+        reject_private(saved_values)
         original = dict(saved_values["requested_options"])
         for name in {f.name for f in fields(AlleleOptions)} - {
             "requested_options_json"
@@ -294,6 +311,7 @@ def resolve_allele_options(params):
                 original[name] = raw[name]
     else:
         original = raw.get("_allele_requested_options", raw)
+    reject_private(original)
     original = {
         k: v
         for k, v in original.items()
