@@ -32,14 +32,14 @@ def _write(path, data):
     path.write_text(json.dumps(data, sort_keys=True, indent=2, default=str) + "\n")
 
 
-def _context_entities(bundle, optimizer, target, region):
-    catalog = VariantCatalog.from_dict(
-        _read(
-            _contained(
-                bundle, optimizer.get("catalogPath", "stages/strict/catalog.json.gz")
-            )
-        )
+def _catalog_path(bundle, optimizer):
+    return _contained(
+        bundle, optimizer.get("catalogPath", "stages/strict/catalog.json.gz")
     )
+
+
+def _context_entities(bundle, optimizer, target, region):
+    catalog = VariantCatalog.from_dict(_read(_catalog_path(bundle, optimizer)))
     references = optimizer.get("publication", {}).get("targetToReference", {})
     targets = {
         t.id
@@ -154,6 +154,7 @@ def _query_history(
     path = _contained(bundle, optimizer["history"]["path"])
     output = {name: [] for name in CoverageHistory._streams}
     pages, records, direct = {}, {}, set()
+    snapshot_roots = []
     max_linked = min(10000, max(100, 10 * limit))
     db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
     try:
@@ -226,7 +227,7 @@ def _query_history(
 
         for stream in output:
             terms, args = ["r.stream=?"], [stream]
-            if entities is not None:
+            if entities is not None and stream != "snapshots":
                 # json_each avoids SQL variable limits; entity_records' primary
                 # index narrows candidates without decoding unrelated payloads.
                 terms.append(
@@ -261,7 +262,12 @@ def _query_history(
             sql = (
                 "SELECT r.position,r.stream,r.ordinal,r.id,r.payload FROM records r WHERE "
                 + " AND ".join(terms)
-                + " ORDER BY r.ordinal LIMIT ? OFFSET ?"
+                + (
+                    " ORDER BY r.ordinal DESC"
+                    if stream == "snapshots"
+                    else " ORDER BY r.ordinal"
+                )
+                + " LIMIT ? OFFSET ?"
             )
             rows = db.execute(sql, (*args, limit + 1, offset)).fetchall()
             pages[stream] = {
@@ -271,10 +277,16 @@ def _query_history(
                 "truncated": len(rows) > limit,
                 "next_offset": offset + limit if len(rows) > limit else None,
             }
+            if stream == "snapshots":
+                pages[stream].update(
+                    contextual=True, entity_filter_applied=False, order="newest-first"
+                )
             for row in rows[:limit]:
                 record, links = decode(row)
                 records[record.id] = (row[1], record, links)
                 direct.add(record.id)
+                if stream == "snapshots":
+                    snapshot_roots.append(record.id)
         pending = deque(records)
         truncated = False
         while pending:
@@ -294,6 +306,33 @@ def _query_history(
                 record, links = decode(row)
                 records[identity] = (expected, record, links)
                 pending.append(identity)
+        # Snapshots have disposition keys rather than entity-index entries.
+        # Preserve complete canonical records, and expose a separate filtered
+        # view; never assign the original semantic ID to a changed payload.
+        disposition_views = []
+        for root_id in snapshot_roots:
+            current_id = root_id
+            dispositions, origins = {}, {}
+            while current_id in records:
+                snapshot = records[current_id][1]
+                for identity, disposition in snapshot.dispositions.items():
+                    if (
+                        entities is None or identity in entities
+                    ) and identity not in dispositions:
+                        dispositions[identity] = disposition
+                        origins[identity] = snapshot.id
+                current_id = snapshot.prior_snapshot_id
+                if current_id is None:
+                    break
+            disposition_views.append(
+                {
+                    "snapshot_id": root_id,
+                    "dispositions": dispositions,
+                    "source_snapshot_ids": origins,
+                    "inheritance_complete": current_id is None,
+                    "unresolved_prior_snapshot_id": current_id,
+                }
+            )
         for stream, record, _ in records.values():
             output[stream].append(record.to_dict())
         for stream in output:
@@ -330,6 +369,7 @@ def _query_history(
             "snapshot_prefix_hashes_verified": False,
         },
         matched_record_ids=sorted(direct),
+        snapshot_dispositions=disposition_views,
     )
     output["discovery_conditions"] = list(discovery_condition_rows(output))
     return output
@@ -541,7 +581,17 @@ def audit_allele_bundle(bundle, *, tier=None):
                 raise ValueError("tier identity mismatch")
             catalog = VariantCatalog.from_dict(_read(directory / "catalog.json.gz"))
             saved_targets = _targets(_read(directory / "authoritative-targets.json.gz"))
-            if targets != saved_targets or targets != catalog.targets:
+
+            # Input order is scientifically meaningful inside each Target's
+            # occurrence identity; container order differs because catalogs sort
+            # IDs. Compare whole records in one canonical order, not a set that
+            # could collapse duplicate source occurrences.
+            def canonical_targets(values):
+                return tuple(sorted(values, key=lambda t: t.id))
+
+            if canonical_targets(targets) != canonical_targets(
+                saved_targets
+            ) or canonical_targets(targets) != canonical_targets(catalog.targets):
                 violations.append(
                     {"reason": "raw-input-target-mismatch", "stage": name}
                 )
@@ -633,7 +683,7 @@ def run_inspection(command, bundle, output, *, argv, **options):
                 ):
                     candidates.extend(
                         [
-                            bundle / "stages/strict/catalog.json.gz",
+                            _catalog_path(bundle, optimizer),
                             _contained(
                                 bundle,
                                 optimizer["history"].get(

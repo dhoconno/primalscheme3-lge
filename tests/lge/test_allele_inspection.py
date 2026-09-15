@@ -486,6 +486,22 @@ def test_origin_history_is_separate_and_independently_paginated(tmp_path):
     shutil.copyfile(
         bundle / "history/history.sqlite", origin / "history/history.sqlite"
     )
+    with SQLiteCoverageHistory(origin / "history", run_id="test") as h:
+        prior = h.complete_stage(
+            stage_id="strict",
+            dispositions={
+                entity: "rejected" for event in h.events for entity in event.entity_ids
+            },
+            catalog_digest=cat.semantic_digest,
+            ledger_digest=ledger.semantic_digest,
+        )
+        h.complete_stage(
+            stage_id="salvage-1",
+            dispositions={},
+            catalog_digest=cat.semantic_digest,
+            ledger_digest=ledger.semantic_digest,
+            prior_snapshot_id=prior.id,
+        )
     _write(origin / "catalog.json.gz", cat.to_dict())
     _write(origin / "configuration-ledger.json.gz", ledger.to_dict())
     manifest = {
@@ -512,6 +528,11 @@ def test_origin_history_is_separate_and_independently_paginated(tmp_path):
     assert result["origin_discovery"]["assessments"][0]["outcome"] == "fail"
     assert result["origin_discovery"]["scope"]["current_decisions"] is False
     assert result["assessments"][0]["outcome"] == "fail"
+    inherited = api().query_allele_history(
+        bundle, entity="site", stage="salvage-1", lineage=True, limit=1
+    )["origin_discovery"]
+    assert inherited["snapshot_dispositions"][0]["dispositions"] == {"site": "rejected"}
+    assert inherited["snapshot_dispositions"][0]["inheritance_complete"]
 
 
 def test_region_inside_amplicon_finds_family_without_overlapping_primers(tmp_path):
@@ -529,8 +550,17 @@ def test_region_inside_amplicon_finds_family_without_overlapping_primers(tmp_pat
     )
     with SQLiteCoverageHistory(bundle / "history", run_id="r") as h:
         h.emit(stage_id="discovery", kind="family", entity_ids=(cat.families[0].id,))
+        h.complete_stage(
+            stage_id="discovery",
+            dispositions={cat.families[0].id: "generated"},
+            catalog_digest=cat.semantic_digest,
+            ledger_digest=ledger.semantic_digest,
+        )
     report = api().query_allele_history(bundle, region=(100, 110), stage="discovery")
     assert len(report["events"]) == 1
+    assert report["snapshot_dispositions"][0]["dispositions"] == {
+        cat.families[0].id: "generated"
+    }
 
 
 def test_missing_execution_identity_is_not_a_successful_audit(bundle):
@@ -559,3 +589,113 @@ def test_early_unsafe_history_path_retains_manifest_descriptors(tmp_path):
     assert not report["valid"]
     provenance = json.loads((output / "provenance.json").read_text())
     assert any(d["path"] == "panel-optimizer.json" for d in provenance["inputs"])
+
+
+def test_multifasta_audit_compares_complete_targets_by_identity(tmp_path):
+    from primalscheme3.core.config import Config
+    from primalscheme3.panel.panel_classes import PanelRunModes
+    from primalscheme3.panel.panel_main import panelcreate
+
+    paths = []
+    for i, base in enumerate("TGCAA"):
+        path = tmp_path / f"{i}.fa"
+        path.write_text(">same\n" + base * 30 + "\n")
+        paths.append(path)
+    output = tmp_path / "multi"
+    panelcreate(
+        paths,
+        output,
+        Config(
+            selection_algorithm="allele-coverage",
+            amplicon_size=200,
+            amplicon_size_min=150,
+            amplicon_size_max=250,
+            ncores=1,
+            optimizer_starts=1,
+            optimizer_repair_rounds=0,
+        ),
+        None,
+        mode=PanelRunModes.EQUAL,
+        executed_argv=["primalscheme3", "panel-create"],
+    )
+    result = api().audit_allele_bundle(output)
+    assert result["valid"], result["violations"]
+    # Identical content occurrences remain distinct, not collapsed by this check.
+    from primalscheme3.panel.allele_publication import _read
+
+    targets = _read(output / "stages/strict/authoritative-targets.json.gz")
+    assert len(targets) == 5 and len({t["id"] for t in targets}) == 5
+
+
+def snapshot_bundle(path, chain=1):
+    path.mkdir()
+    (path / "panel-optimizer.json").write_text(
+        json.dumps({"history": {"path": "history/history.sqlite"}})
+    )
+    with SQLiteCoverageHistory(path / "history", run_id="snapshots") as h:
+        h.emit(stage_id="strict", kind="assessed", entity_ids=("site",))
+        prior = h.complete_stage(
+            stage_id="strict",
+            dispositions={"site": "rejected"},
+            catalog_digest="cat",
+            ledger_digest="ledger",
+        )
+        for i in range(chain):
+            prior = h.complete_stage(
+                stage_id=f"salvage-{i + 1}",
+                dispositions={},
+                catalog_digest="cat",
+                ledger_digest="ledger",
+                prior_snapshot_id=prior.id,
+            )
+    return path
+
+
+def test_entity_snapshot_dispositions_and_bounded_inheritance(tmp_path):
+    bundle = snapshot_bundle(tmp_path / "bundle", chain=102)
+    result = api().query_allele_history(bundle, entity="site", stage="strict", limit=1)
+    assert result["snapshots"][0]["dispositions"]["site"] == "rejected"
+    assert result["pagination"]["snapshots"]["contextual"] is True
+    inherited = api().query_allele_history(
+        bundle, entity="site", stage="salvage-1", lineage=True, limit=1
+    )
+    assert inherited["snapshot_dispositions"][0]["dispositions"]["site"] == "rejected"
+    assert inherited["snapshot_dispositions"][0]["inheritance_complete"] is True
+    truncated = api().query_allele_history(
+        bundle, entity="site", stage="salvage-102", lineage=True, limit=1
+    )
+    assert truncated["linked"]["truncated"] is True
+    assert truncated["snapshot_dispositions"][0]["inheritance_complete"] is False
+    assert len(truncated["snapshots"]) <= 101
+
+
+def test_custom_catalog_is_hashed_and_changes_during_query_fail(tmp_path, monkeypatch):
+    from test_allele_validation import dna, fixture
+
+    from primalscheme3.panel.allele_publication import _write
+
+    cat, _, ledger = fixture(seq=dna(seed=0))
+    bundle = history_bundle(tmp_path / "bundle")
+    _write(bundle / "custom.json.gz", cat.to_dict())
+    _write(bundle / "configuration-ledger.json.gz", ledger.to_dict())
+    optimizer = json.loads((bundle / "panel-optimizer.json").read_text())
+    optimizer["catalogPath"] = "custom.json.gz"
+    _write(bundle / "panel-optimizer.json", optimizer)
+    result = api().run_inspection(
+        "panel-history", bundle, tmp_path / "ok", argv=["query"], region=(0, 200)
+    )
+    assert result["valid"]
+    receipt = json.loads((tmp_path / "ok/provenance.json").read_text())
+    assert "custom.json.gz" in {d["path"] for d in receipt["inputs"]}
+    original = api().query_allele_history
+
+    def mutate(*args, **kwargs):
+        result = original(*args, **kwargs)
+        with (bundle / "custom.json.gz").open("ab") as handle:
+            handle.write(b"changed")
+        return result
+
+    monkeypatch.setattr(api(), "query_allele_history", mutate)
+    assert not api().run_inspection(
+        "panel-history", bundle, tmp_path / "changed", argv=["query"], region=(0, 200)
+    )["valid"]
