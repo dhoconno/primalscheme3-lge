@@ -456,3 +456,9 @@ def write_catalog(catalog: Catalog, path: str | Path) -> dict[str, str | int]:
         "file_sha256": hashlib.sha256(data).hexdigest(),
         "file_size": len(data),
     }
+
+
+def build_variant_catalog(*args, **kwargs):
+    """V2 route, imported lazily to preserve the v1 support helper dependencies."""
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog as build
+    return build(*args, **kwargs)

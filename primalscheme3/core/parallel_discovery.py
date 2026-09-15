@@ -37,6 +37,9 @@ def _initialize_worker(array, config, inherited_mask=None):
 
 
 def evaluate_task(array, config, task):
+    if len(task) >= 3 and task[2] == 'variants':
+        from primalscheme3.core.digestion import variant_digest_index
+        return variant_digest_index(array, config, task[0], task[1], length_mode=task[3] if len(task) > 3 else 'first-compatible')
     direction, index = task
     if direction == 'f':
         result = f_digest_index(array, config, index, config.min_base_freq)
@@ -131,7 +134,7 @@ def pool_results(chunks, array, config, workers):
                 pool.join()
 
 
-def discover(array, config, progress_manager=None, indexes=None, logger=None, chrom=''):
+def discover(array, config, progress_manager=None, indexes=None, logger=None, chrom='', *, variant_mode=False, discovery_length_mode='first-compatible'):
     width = array.shape[1]
     if indexes is None:
         forward = range(config.primer_size_min, width + 1)
@@ -143,7 +146,13 @@ def discover(array, config, progress_manager=None, indexes=None, logger=None, ch
         if any(i < 0 or i + config.primer_size_min > width for i in reverse):
             raise IndexError('RIndexes are out of range')
     tasks = [('f', int(i)) for i in forward] + [('r', int(i)) for i in reverse]
+    if variant_mode:
+        if discovery_length_mode not in ('first-compatible', 'all'):
+            raise ValueError('discovery length mode must be first-compatible or all')
+        tasks = [(direction, index, 'variants', discovery_length_mode) for direction, index in tasks]
     if not tasks:
+        if variant_mode:
+            return [], 0
         return ([], []), 0
     chunks = [tasks[i:i + CHUNK_SIZE] for i in range(0, len(tasks), CHUNK_SIZE)]
     workers = resolve_worker_count(config.ncores, len(chunks))
@@ -151,6 +160,11 @@ def discover(array, config, progress_manager=None, indexes=None, logger=None, ch
         ([evaluate_task(array, config, task) for task in chunk] for chunk in chunks)
         if workers == 1 else pool_results(chunks, array, config, workers)
     )
+    if variant_mode:
+        try:
+            return [record for batch in records for task_records in batch for record in task_records], workers
+        finally:
+            records.close()
     manager = progress_manager or ProgressManager()
     tracker = manager.create_sub_progress(iter=records, process='Python discovery', chrom=chrom, total=len(chunks))
     fkmers, rkmers = [], []

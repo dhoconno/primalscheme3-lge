@@ -320,6 +320,7 @@ class MSA:
         self,
         config: Config,
         indexes: tuple[list[int], list[int]] | None = None,
+        *, variant_mode: bool = False,
     ) -> None:
         """
         Digest the given MSA array and return the FKmers and RKmers.
@@ -329,6 +330,13 @@ class MSA:
         :return: None (Class is updated inplace)
         """
         from primalscheme3.core.parallel_discovery import discover
+
+        if variant_mode:
+            records, workers = discover(self.array, config, self.progress_manager, indexes,
+                                        self.logger, self.name, variant_mode=True,
+                                        discovery_length_mode=getattr(config, 'discovery_length_mode', 'first-compatible'))
+            config.discovery_workers_by_msa[str(self.msa_index)] = workers
+            return records
 
         (self.fkmers, self.rkmers), workers = discover(
             self.array, config, self.progress_manager, indexes, self.logger, self.name

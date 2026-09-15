@@ -1,0 +1,215 @@
+"""Variant evidence precedes all cloud-level filters."""
+from dataclasses import replace
+import numpy as np
+from primalscheme3.core.config import Config
+from primalscheme3.core.parallel_discovery import discover
+from primalscheme3.panel.coverage_types import Target
+
+SHARED = 'CAACGGCGGACTTTATTGTATCTCC'
+HIGH = 'AATCGGCCGACTGTACGCGA'
+NORMAL = 'CATGCTCATTAGGTATATCTTTCAATAAGTTGCA'
+
+
+def target(rows):
+    width = max(map(len, rows))
+    rows = tuple(tuple(row.rjust(width, '-')) for row in rows)
+    ref = ''.join(x for x in rows[0] if x not in ('', '-'))
+    mapping, position = [], 0
+    for x in rows[0]:
+        mapping.append(position if x not in ('', '-') else None)
+        position += x not in ('', '-')
+    reverse = tuple(i for i, x in enumerate(mapping) if x is not None)
+    return Target('t', 0, 0, tuple(str(i) for i in range(len(rows))), rows,
+                  ref, len(ref), tuple(mapping), reverse + (width,))
+
+
+def test_row_variants_survive_failing_sibling_and_preserve_failed_evidence():
+    t = target([SHARED, 'A' * len(SHARED), HIGH])
+    records, _ = discover(np.array(t.rows), Config(), indexes=([len(t.rows[0])], []), variant_mode=True, discovery_length_mode='all')
+    assert any(r['sequence'] == SHARED and r['accepted'] for r in records)
+    assert any(r['sequence'] == 'A' * len(SHARED) and not r['accepted'] for r in records)
+    assert all('checks' in r for r in records if r['sequence'])
+
+
+def test_union_profiles_merge_shared_sites_without_rectangular_chemistry():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    t = target([NORMAL, SHARED, HIGH])
+    catalog = build_variant_catalog((t,), Config(), length_mode='all', indexes=([len(t.rows[0])], []))
+    sites = {s.sequence: s for s in catalog.sites}
+    assert sites[NORMAL].accepting_profile_ids == ('normal',)
+    assert sites[HIGH].accepting_profile_ids == ('high-gc',)
+    assert sites[SHARED].accepting_profile_ids == ('high-gc', 'normal')
+
+
+def test_gap_walk_uses_original_anchor_and_missing_is_diagnostic():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    cells = tuple(SHARED[:8] + '-' + SHARED[8:])
+    t = target([''.join(cells), ''.join(cells)])
+    t = replace(t, rows=(cells, ('',) * len(cells)))
+    catalog = build_variant_catalog((t,), Config(), length_mode='all', indexes=([len(cells)], []))
+    site = next(s for s in catalog.sites if s.sequence == SHARED)
+    assert site.alignment_anchor == len(cells)
+    assert site.reference_footprint == (0, len(SHARED))
+
+
+def test_hybrid_family_retains_short_member_when_longer_mapping_fails():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    # The longer normal-only site falls outside the shorter first reference.
+    t = target([SHARED + 'ATATATATAT' + HIGH, NORMAL + 'ATATATATAT' + HIGH])
+    end = len(t.rows[0]) - len(HIGH) - 10
+    config = Config(amplicon_size=54, amplicon_size_min=50, amplicon_size_max=65)
+    catalog = build_variant_catalog((t,), config, length_mode='all', indexes=([end], [end + 10]))
+    short = next(s for s in catalog.sites if s.sequence == SHARED and s.strand == '+')
+    long = next(s for s in catalog.sites if s.sequence == NORMAL and s.strand == '+')
+    assert short.reference_footprint is not None
+    assert long.reference_footprint is None
+    assert any(short.id in f.forward_site_ids for f in catalog.families)
+    assert all(long.id not in f.forward_site_ids for f in catalog.families)
+
+
+def test_discovery_worker_count_does_not_change_records():
+    t = target([SHARED * 4])
+    one = discover(np.array(t.rows), Config(ncores=1), variant_mode=True, discovery_length_mode='all')[0]
+    two = discover(np.array(t.rows), Config(ncores=2), variant_mode=True, discovery_length_mode='all')[0]
+    assert one == two
+
+
+def test_self_dimer_measurement_agrees_with_native_boolean_at_boundary():
+    from primalschemers import do_pool_interact
+    from primalscheme3.core.variant_thermo import variant_measurements
+    for seq in (SHARED, HIGH, NORMAL, 'ACGTACGTACGTACGTACGT'):
+        score = variant_measurements(seq, Config())['self-dimer']['value']
+        for cutoff in (score - 1e-6, score, score + 1e-6, -26):
+            assert (score <= cutoff) == do_pool_interact([seq.encode()], [seq.encode()], cutoff)
+
+
+def test_failed_sites_and_aliases_have_history_and_no_sibling_frequency_veto(tmp_path):
+    from primalscheme3.panel.coverage_history import CoverageHistory
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    history = CoverageHistory(tmp_path, run_id='test')
+    t = target([SHARED, SHARED, 'A'*len(SHARED)])
+    catalog = build_variant_catalog((t,), Config(min_base_freq=.5), length_mode='all', indexes=([len(SHARED)], []), history=history)
+    shared = next(s for s in catalog.sites if s.sequence == SHARED)
+    failed = next(s for s in catalog.sites if s.sequence == 'A'*len(SHARED))
+    assert shared.id in catalog.selectable_site_ids
+    assert failed.id not in catalog.selectable_site_ids
+    assert history.snapshots[-1].completeness == 'complete'
+    for site in (shared, failed):
+        events = [e for e in history.events if site.id in e.entity_ids]
+        assert events[0].kind == 'generated'
+        assert any(e.kind == 'assessed' for e in events)
+    assert any(e.kind == 'deduplication-alias' for e in history.events)
+
+
+def test_high_gc_short_anchor_does_not_fail_normal_index_validation():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    t = target(['GCGTACGCGTACGCGTA'])
+    catalog = build_variant_catalog((t,), Config(), length_mode='all', indexes=([17], [0]))
+    assert catalog.sites
+    assert all(s.generated_profile_ids == ('high-gc',) for s in catalog.sites)
+
+
+def test_cloud_internal_dimer_does_not_erase_either_chemical_variant():
+    from primalschemers import do_pool_interact
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    a, b = 'TCGCTGTTAGCATTTCAGTCTCCT', 'AGGTGTAGGAAAGTGGAGGAGACC'
+    assert do_pool_interact([a.encode()], [b.encode()], -26)
+    catalog = build_variant_catalog((target([a, b]),), Config(), length_mode='all', indexes=([24], []))
+    selected = {s.sequence for s in catalog.sites if s.id in catalog.selectable_site_ids}
+    assert {a, b} <= selected
+
+
+def test_ambiguous_expansion_has_unknown_support_and_omission_boundary():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    from primalscheme3.panel.allele_coverage import binding_support
+    from primalscheme3.panel.coverage_history import CoverageHistory
+    t = target([SHARED[:-1] + 'N', 'N' * len(SHARED)])
+    history = CoverageHistory(None, run_id='ambiguity')
+    catalog = build_variant_catalog((t,), Config(), length_mode='all', indexes=([len(SHARED)], []), history=history)
+    site = next(s for s in catalog.sites if s.sequence == SHARED)
+    assert all(binding_support(site, a).status == 'unknown' for a in catalog.observations)
+    assert any(e.values.get('reason') == 'ambiguous-expansion-limit' for e in history.evidence)
+
+
+def test_union_catalog_identity_does_not_depend_on_worker_count_or_profile_order():
+    from copy import copy
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog, discovery_profiles
+    t = target([SHARED * 4])
+    profiles = discovery_profiles(Config())
+    # One length per profile keeps the history fixture small; >128 tasks still
+    # uses two real spawned workers, with actual thermodynamic measurements.
+    for p in profiles.values():
+        p.primer_size_max = p.primer_size_min
+    one = build_variant_catalog((t,), Config(), profiles=profiles)
+    reverse = {name: copy(p) for name, p in reversed(list(profiles.items()))}
+    for p in reverse.values():
+        p.ncores = 2
+    two = build_variant_catalog((t,), Config(), profiles=reverse)
+    assert one.semantic_digest == two.semantic_digest
+    assert one.sites == two.sites
+
+
+def test_cross_profile_rectangle_is_not_a_complete_accepting_profile():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    # Its 32 nt length requires normal, its 62.5% GC requires high-gc.
+    sequence = 'GCGCAT' * 5 + 'AA'
+    assert len(sequence) == 32
+    catalog = build_variant_catalog((target([sequence]),), Config(), length_mode='all', indexes=([32], []))
+    site = next(s for s in catalog.sites if s.sequence == sequence)
+    assert site.accepting_profile_ids == ()
+    assert site.id not in catalog.selectable_site_ids
+
+
+def test_first_compatible_is_row_local_and_records_unexamined_longer_lengths():
+    t = target([SHARED, 'A' * len(SHARED)])
+    records, _ = discover(np.array(t.rows), Config(), indexes=([len(SHARED)], []), variant_mode=True)
+    first_row = [r for r in records if r['row_index'] == 0]
+    passing = [r for r in first_row if r['sequence'] and r['accepted']]
+    assert len(passing) == 1
+    boundary = next(r for r in first_row if r['reason'] == 'first-compatible-length-stop')
+    assert boundary['unexamined_length_interval'] == (passing[0]['length'] + 1, 37)
+    assert all(r['length'] <= passing[0]['length'] for r in first_row if r['sequence'])
+    # A failing sibling still evaluates its entire available footprint.
+    assert any(r['row_index'] == 1 and r['length'] == len(SHARED) and r['sequence'] for r in records)
+
+
+def test_explicit_exhaustive_length_mode_retains_later_compatible_lengths():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    t = target([SHARED])
+    first = build_variant_catalog((t,), Config(), indexes=([len(SHARED)], []))
+    all_lengths = build_variant_catalog((t,), Config(), indexes=([len(SHARED)], []), length_mode='all')
+    assert len(first.sites) < len(all_lengths.sites)
+    assert '"discovery_length_mode":"first-compatible"' in first.resolved_config_json
+    assert '"discovery_length_mode":"all"' in all_lengths.resolved_config_json
+
+
+def test_family_geometry_recomputes_envelope_without_longest_valid_member():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    t = target([NORMAL + 'ATATATATAT' + HIGH, SHARED + 'ATATATATAT' + HIGH])
+    end = len(NORMAL)
+    catalog = build_variant_catalog((t,), Config(amplicon_size=55, amplicon_size_min=50, amplicon_size_max=60),
+                                    length_mode='all', indexes=([end], [end + 10]))
+    short = next(s for s in catalog.sites if s.sequence == SHARED and s.strand == '+')
+    long = next(s for s in catalog.sites if s.sequence == NORMAL and s.strand == '+')
+    assert short.reference_footprint is not None and long.reference_footprint is not None
+    family = next(f for f in catalog.families if short.id in f.forward_site_ids and long.id in f.forward_site_ids)
+    assert ('normal', 'high-gc') in family.discovery_profile_combinations
+    reverse = next(catalog.site_by_id[x] for x in family.reverse_site_ids
+                   if len(catalog.site_by_id[x].sequence) == len(HIGH))
+    assert reverse.reference_footprint[1] - long.reference_footprint[0] > 60
+    assert 50 <= reverse.reference_footprint[1] - short.reference_footprint[0] <= 60
+
+
+def test_numeric_chemistry_evidence_is_shared_across_sites_and_profiles():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    from primalscheme3.panel.coverage_history import CoverageHistory
+    history = CoverageHistory(None, run_id='shared')
+    catalog = build_variant_catalog((target([SHARED * 2]),), Config(), length_mode='all',
+                                    indexes=([len(SHARED), len(SHARED) * 2], []), history=history)
+    shared_sites = [s for s in catalog.sites if s.sequence == SHARED]
+    evidence = [e for e in history.evidence if e.measurement == 'oligo-thermodynamics'
+                and e.dependency_key['sequence'] == SHARED]
+    assert len(shared_sites) == 2
+    assert len(evidence) == 1
+    assert all(evidence[0].id in s.intrinsic_evidence_ids for s in shared_sites)
+    assert evidence[0].entity_ids == (shared_sites[0].species_id,)

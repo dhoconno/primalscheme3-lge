@@ -872,3 +872,91 @@ def digest(
         pt.manual_update(count=len(rkmers))
 
     return (fkmers, rkmers)
+
+
+# Variant discovery deliberately does not call process_results or the cloud
+# digesters: those routines discard row identity and chemically useful siblings.
+def variant_digest_index(array, config, direction, index, *, expansion_limit=256, length_mode="first-compatible"):
+    """Return primitive row-local evidence; no distinct-member dimer gate.
+
+    Enumerate a measured length prefix (or all lengths), walking across internal
+    gaps. Missing cells stop the walk. IUPAC expansions are bounded explicitly;
+    omitted branches are recorded, never silently treated as observed sequence.
+    """
+    from itertools import product
+    from math import prod
+    from primalscheme3.core.config import ALL_DNA_WITH_N
+    from primalscheme3.core.variant_thermo import variant_measurements
+
+    if length_mode not in ('first-compatible', 'all'):
+        raise ValueError('discovery length mode must be first-compatible or all')
+    if direction not in ('f', 'r'):
+        raise ValueError('Invalid discovery task direction')
+    records = []
+    for row_index, row in enumerate(array):
+        selected = []
+        cursor = index - 1 if direction == 'f' else index
+        step = -1 if direction == 'f' else 1
+        walked = 0
+        for length in range(1, config.primer_size_max + 1):
+            failure = None
+            while True:
+                if not 0 <= cursor < len(row) or row[cursor] == '':
+                    failure = 'unavailable-footprint'
+                    break
+                if walked >= config.primer_max_walk:
+                    failure = 'maximum-alignment-walk'
+                    break
+                cell = str(row[cursor]).upper()
+                walked += 1
+                column = cursor
+                cursor += step
+                if cell == '-':
+                    continue
+                if cell not in ALL_DNA_WITH_N:
+                    failure = 'invalid-base'
+                    break
+                selected.append(column)
+                break
+            base = dict(direction=direction, index=index, row_index=row_index,
+                        alignment_footprint=tuple(sorted(selected)), length=length)
+            if failure:
+                records.append(dict(base, sequence=None, accepted=False, reason=failure, checks={}))
+                break
+            if length < config.primer_size_min:
+                continue
+            cells = [str(row[i]).upper() for i in sorted(selected)]
+            expansions = prod(len(ALL_DNA_WITH_N[x]) for x in cells)
+            if expansions > expansion_limit:
+                records.append(dict(base, sequence=None, accepted=False,
+                                    reason='ambiguous-expansion-limit', checks={},
+                                    expansion_count=expansions, expansion_limit=expansion_limit))
+                continue
+            compatible = False
+            for bases in product(*(ALL_DNA_WITH_N[x] for x in cells)):
+                seq = ''.join(bases)
+                if direction == 'r':
+                    seq = reverse_complement(seq)
+                checks = variant_measurements(seq, config)
+                accepted = all(x['outcome'] == 'pass' for k, x in checks.items() if k != 'self-dimer')
+                compatible |= accepted
+                records.append(dict(base, sequence=seq,
+                                    accepted=accepted,
+                                    reason='profile-chemistry', checks=checks,
+                                    support='unknown' if expansions > 1 else 'confirmed'))
+            if compatible and length_mode == 'first-compatible':
+                records.append(dict(base, sequence=None, accepted=False, checks={},
+                                    reason='first-compatible-length-stop',
+                                    unexamined_length_interval=(length + 1, config.primer_size_max + 1)))
+                break
+    # Frequency is a per-sequence enumeration policy, never an error quorum.
+    counts = Counter((r['sequence'], r['length']) for r in records if r['sequence'])
+    for record in records:
+        if record['sequence']:
+            frequency = counts[record['sequence'], record['length']] / len(array)
+            passes = frequency >= config.min_base_freq
+            record['frequency'] = frequency
+            record['checks']['minimum-frequency'] = dict(value=frequency, minimum=config.min_base_freq,
+                                                         outcome='pass' if passes else 'fail')
+            record['accepted'] &= passes
+    return records
