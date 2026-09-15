@@ -171,6 +171,87 @@ distinct selector approaches on the same frozen catalogue, profile and objective
 been requested as a separate experiment and remains pending; the current results do
 not establish ensemble behavior.
 
+## Allele-coverage benchmark fixture receipts
+
+`scripts/benchmark_allele_coverage.py` freezes local MHC inputs before an
+allele-aware benchmark. It reads the saved primer-analysis manifest, selects the
+requested inputs by the manifest's human-readable `label`, verifies every selected
+artifact's declared SHA-256 and byte size, and only then copies those bytes. The
+snapshot contains `source-row-label-map.json` and `hash-manifest.json`. Repeated
+labels remain separate records keyed by their original `sourceOccurrenceID`; UUID
+ordering is never used to infer fixture identity. The runner refuses an existing
+output directory and does not modify the source bundle.
+
+The required command interface is:
+
+```sh
+.venv/bin/python scripts/benchmark_allele_coverage.py \
+  --fixture-root /path/to/local-fixtures \
+  --native-executable /path/to/primalscheme3 \
+  --matrix /path/to/matrix.json \
+  --output /new/immutable/evidence-directory
+```
+
+The matrix names `fixtureAnalysis`, the complete `inputLabels` selection, and
+explicit comparison entries. The MHC matrix must distinguish these controls:
+
+```json
+{
+  "schemaVersion": "allele-coverage-benchmark-matrix/v1",
+  "fixtureAnalysis": "mhc-primal-scheme.lungfish/Analyses/MHC merged v1.lungfishprimeranalysis",
+  "inputLabels": [
+    "KIR2DL04.lungfishmsa", "KIR3DL10.lungfishmsa", "KIR3DS.lungfishmsa",
+    "Mamu-A1.lungfishmsa", "Mamu-A2.lungfishmsa", "Mamu-A4.lungfishmsa",
+    "Mamu-B.lungfishmsa", "Mamu-DPA.lungfishmsa", "Mamu-DQB.lungfishmsa",
+    "Mamu-DRB.lungfishmsa", "Mamu-E.lungfishmsa"
+  ],
+  "comparisons": [
+    {"id": "historical-independent-lge.2", "kind": "historical-artifact"},
+    {"id": "historical-combined-lge.2", "kind": "historical-artifact"},
+    {"id": "existing-lge.3", "kind": "historical-artifact"},
+    {
+      "id": "upstream-original-3.3.0",
+      "kind": "native-execution",
+      "executable": "/isolated/upstream-3.3.0/bin/primalscheme3",
+      "argv": ["panel-create", "--output", "{output}", "{inputs}"],
+      "resolvedOptions": {}
+    }
+  ]
+}
+```
+
+The upstream-original control is the clean upstream PrimalScheme repository
+(`artic-network/primalscheme3`, version 3.3.0, commit prefix `60455e9`) in an
+isolated environment. It is distinct from saved LGE legacy outputs. Historical
+independent/combined lge.2 artifacts, the existing lge.3 result, and upstream
+original use different scientific profiles and remain diagnostic comparisons until
+they are re-evaluated under one declared metric and specificity contract.
+
+Each executed matrix row writes this minimum receipt shape, with additional schema,
+workflow, shell-command and stdout fields allowed:
+
+```python
+receipt = {
+    "argv": argv,
+    "resolvedOptions": resolved,
+    "inputArtifacts": inputs,
+    "outputArtifacts": outputs,
+    "sourceIdentity": source,
+    "runtimeIdentity": runtime,
+    "exitStatus": completed.returncode,
+    "wallTimeSeconds": elapsed,
+    "stderrPath": stderr_path,
+}
+```
+
+Paths in output records resolve beneath the final evidence directory. Receipts
+retain exact argument arrays and reproducible shell rendering, workflow and version,
+resolved options/defaults supplied by the matrix, source commit and dirty state,
+Python/conda/container identity, input/output hashes and sizes, status, wall time,
+and captured stderr. A failed subprocess still writes its receipt and stderr. A
+fixture checksum failure writes runner failure provenance and prevents scientific
+execution.
+
 The deterministic abstract benchmark exercised the real search core on 100 synthetic
 300-base interval targets, 300 candidates and 200 declared overlap edges. One pool,
 one start and no repair selected one 260-base greedy interval per target
