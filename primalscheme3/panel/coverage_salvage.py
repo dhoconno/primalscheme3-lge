@@ -74,6 +74,7 @@ class SalvageRun:
     strict: object
     tiers: tuple[SalvageTier, ...]
     options: SalvageOptions
+    stop_reason: str = "completed"
 
 
 def compare_to_strict(strict, tier):
@@ -151,8 +152,15 @@ def run_salvage(
         a.stage_id != "strict" for a in strict.assignments
     ):
         raise ValueError("salvage requires a validated strict result")
+    if profile.to_dict() != strict.validation.get("profile"):
+        raise ValueError("salvage cannot change the strict scientific profile")
+    if (
+        search_options is not None
+        and search_options.coverage_target != strict.coverage.goal
+    ):
+        raise ValueError("salvage cannot change the strict coverage objective")
     if options.mode == "off":
-        return SalvageRun(strict, (), options)
+        return SalvageRun(strict, (), options, "off")
     # A supplied success flag cannot substitute for fresh baseline validation.
     baseline_check = validate_allele_assignments(
         strict.catalog,
@@ -175,8 +183,22 @@ def run_salvage(
     score_cache = {} if score_cache is None else score_cache
     previous = strict
     tiers = []
+    stop_reason = "completed"
     for index, cutoff in enumerate(options.thresholds, 1):
         if cancelled is not None and cancelled():
+            stop_reason = "cancelled"
+            history.emit(
+                stage_id="salvage",
+                kind="salvage-run-stopped",
+                entity_ids=(),
+                changes={
+                    "reason": "cancelled",
+                    "next_stage": f"salvage-{index}",
+                    "strict_preserved": True,
+                },
+            )
+            if hasattr(history, "checkpoint"):
+                history.checkpoint()
             break
         stage_id = f"salvage-{index}"
         policy = StagePolicy(
@@ -231,26 +253,46 @@ def run_salvage(
             )
             previous = result
         except Exception as error:
+            failed_ids = (
+                tuple(a.configuration_id for a in result.assignments)
+                if result is not None
+                else ()
+            )
             history.emit(
                 stage_id=stage_id,
                 kind="salvage-stage-failed",
-                entity_ids=(),
+                entity_ids=failed_ids,
                 changes={"error": str(error), "strict_preserved": True},
             )
-            if hasattr(history, "checkpoint"):
-                history.checkpoint()
+            prior = history.last_complete_stage
+            touched = {
+                entity
+                for event in history.iter_events(
+                    start=prior.events_count if prior else 0
+                )
+                for entity in event.entity_ids
+            }
+            history.complete_stage(
+                stage_id=stage_id + "-failed",
+                dispositions={e: "tier-publication-failed" for e in touched},
+                catalog_digest=strict.catalog.semantic_digest,
+                ledger_digest=(
+                    result.ledger if result is not None else previous.ledger
+                ).semantic_digest,
+                prior_snapshot_id=prior.id if prior else None,
+            )
             tiers.append(
                 SalvageTier(
                     stage_id,
                     policy,
                     "failed",
-                    None,
+                    result,
                     comparison,
                     str(error),
                     monotonic() - begin,
                 )
             )
-    return SalvageRun(strict, tuple(tiers), options)
+    return SalvageRun(strict, tuple(tiers), options, stop_reason)
 
 
 def select_primary(run, name="strict"):

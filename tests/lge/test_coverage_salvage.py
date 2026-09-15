@@ -123,8 +123,65 @@ def test_existing_strict_coverage_retained_and_tier_callback_failure_cannot_repl
         on_tier=fail,
     )
     assert run.tiers[0].status == "failed"
+    assert (
+        run.tiers[0].result is not None
+    )  # Retain explored ledger for diagnostic history.
     assert "publication failure" in run.tiers[0].error
     assert select_primary(run, "strict") is strict
     with pytest.raises(ValueError):
         select_primary(run, "salvage-1")
     assert strict.assignments == saved
+
+
+def test_salvage_cannot_change_strict_specificity_profile():
+    from primalscheme3.panel.coverage_salvage import SalvageOptions, run_salvage
+
+    strict = strict_result()
+    with pytest.raises(ValueError, match="profile"):
+        run_salvage(strict, profile(199), SalvageOptions(mode="bounded"))
+
+
+def test_failure_disposition_does_not_survive_as_selected_in_cancelled_next_tier():
+    from primalscheme3.panel.coverage_salvage import SalvageOptions, run_salvage
+
+    strict = strict_result()
+    cancel = False
+    emit = strict.history.emit
+
+    def wrapped(**kw):
+        nonlocal cancel
+        if kw["stage_id"] == "salvage-2" and kw["kind"] == "salvage-stage-start":
+            cancel = True
+        return emit(**kw)
+
+    strict.history.emit = wrapped
+
+    def publish(result):
+        if result.metadata["stage_policy"]["stage_id"] == "salvage-1":
+            raise OSError("failed first publication")
+
+    run = run_salvage(
+        strict,
+        profile(),
+        SalvageOptions(mode="bounded", thresholds=(-1000, -1001)),
+        on_tier=publish,
+        cancelled=lambda: cancel,
+    )
+    assert run.tiers[0].status == "failed"
+    assert (
+        run.tiers[0].result is not None
+    )  # Retain explored ledger for diagnostic history.
+    assert not run.tiers[1].result.assignments
+    statuses = strict.history._resolved_dispositions(strict.history.last_complete_stage)
+    assert "selected-salvage" not in statuses.values()
+
+
+def test_cancellation_before_first_tier_has_durable_reason():
+    from primalscheme3.panel.coverage_salvage import SalvageOptions, run_salvage
+
+    strict = strict_result()
+    run = run_salvage(
+        strict, profile(), SalvageOptions(mode="bounded"), cancelled=lambda: True
+    )
+    assert run.stop_reason == "cancelled"
+    assert any(e.kind == "salvage-run-stopped" for e in strict.history.events)
