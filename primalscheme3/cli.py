@@ -1072,5 +1072,48 @@ def downsample_existing_scheme(
     downsample_scheme(bedfile, config, visualise)
 
 
+@app.command("panel-history")
+def panel_history(
+    bundle: Annotated[pathlib.Path, typer.Option(help="Source allele panel bundle")],
+    output: Annotated[pathlib.Path, typer.Option(help="New result directory outside the bundle")],
+    entity: str | None = None,
+    target: Annotated[str | None, typer.Option(help="Target ID or reference name")] = None,
+    region: Annotated[str | None, typer.Option(help="Zero-based half-open reference START:END")] = None,
+    pool: Annotated[int | None, typer.Option(help="One-based pool number")] = None,
+    stage: str | None = None,
+    profile: str | None = None,
+    lineage: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Query generated, rejected and selected entities with bounded history pages."""
+    from primalscheme3.panel.allele_inspection import run_inspection
+
+    # Parsing belongs inside the receipt-producing workflow, including errors.
+    result = run_inspection(
+        "panel-history", bundle, output, argv=list(sys.argv), entity=entity,
+        target=target, region=region, pool=pool, stage=stage, profile=profile,
+        lineage=lineage, limit=limit, offset=offset,
+    )
+    typer.echo(str(output / "query.json"))
+    if not result["valid"]:
+        raise typer.Exit(1)
+
+
+@app.command("panel-audit")
+def panel_audit(
+    bundle: Annotated[pathlib.Path, typer.Option(help="Source allele panel bundle")],
+    output: Annotated[pathlib.Path, typer.Option(help="New audit directory outside the bundle")],
+    tier: Annotated[str | None, typer.Option(help="Audit a named tier; default audits all published tiers")] = None,
+):
+    """Reparse stored original inputs and freshly audit scientific stage artifacts."""
+    from primalscheme3.panel.allele_inspection import run_inspection
+
+    result = run_inspection("panel-audit", bundle, output, argv=list(sys.argv), tier=tier)
+    typer.echo(str(output / "validation.json"))
+    if not result["valid"]:
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()
