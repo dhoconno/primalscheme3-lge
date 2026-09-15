@@ -1,6 +1,6 @@
 [project]
 name = "primalscheme3"
-version = "3.3.0+lge.3"
+version = "3.3.0+lge.4"
 description = "PrimalScheme3-LGE custom fork with explicit terminal missing-coverage policy"
 authors = [{ name = "ChrisKent", email = "chrisgkent@gmail.com" }]
 requires-python = ">=3.11,<3.14"

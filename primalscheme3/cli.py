@@ -1,11 +1,13 @@
 #!/usr/bin/python3
 import argparse
+import inspect
 import json
 import pathlib
 import sys
 from importlib.metadata import version
 from typing import Annotated
 
+import click
 import typer
 
 # Module imports
@@ -421,11 +423,11 @@ def panel_create(
         ),
     ] = None,
     mode: Annotated[
-        PanelRunModes,
+        PanelRunModes | None,
         typer.Option(
             help="Select what run mode",
         ),
-    ] = PanelRunModes.REGION_ONLY.value,  # type: ignore
+    ] = None,
     amplicon_size: Annotated[
         int,
         typer.Option(
@@ -455,11 +457,11 @@ def panel_create(
         float, typer.Option(help="Threshold for dimer interaction")
     ] = Config.dimer_score,
     terminal_gap_policy: Annotated[
-        TerminalGapPolicy,
+        TerminalGapPolicy | None,
         typer.Option(
             help="LGE custom policy: legacy uses upstream Rust; observed-only uses Python discovery, excluding terminal missing coverage without imputation. Internal gaps remain observations."
         ),
-    ] = TerminalGapPolicy.LEGACY,
+    ] = None,
     min_base_freq: Annotated[
         float,
         typer.Option(help="Min freq to be included,[0<=x<=1]", min=0.0, max=1.0),
@@ -522,14 +524,20 @@ def panel_create(
         ),
     ] = Config.downsample_target,
     selection_algorithm: Annotated[
-        str, typer.Option(help="Panel selector: legacy or coverage")
+        str, typer.Option(help="Panel selector: legacy, coverage or allele-coverage")
     ] = "legacy",
     coverage_metric: Annotated[
-        str, typer.Option(help="Coverage interval: full-span or primer-trimmed")
-    ] = "full-span",
+        str | None,
+        typer.Option(
+            help="Metric: full-span, primer-trimmed, or observed-allele-primer-trimmed for allele mode"
+        ),
+    ] = None,
     coverage_target: Annotated[
-        float, typer.Option(help="Per-target coverage objective between zero and one")
-    ] = 0.90,
+        float | None,
+        typer.Option(
+            help="Per-target coverage objective; allele default .95, historical default .90"
+        ),
+    ] = None,
     optimizer_seed: Annotated[
         int, typer.Option(help="Deterministic coverage optimizer seed")
     ] = 0,
@@ -548,52 +556,284 @@ def panel_create(
             help="Coverage supplied-MSA product bound; defaults to 2000 and must be positive"
         ),
     ] = None,
+    preset: Annotated[
+        str | None,
+        typer.Option(
+            help="Versioned allele preset: allele-balanced-v1",
+            rich_help_panel="Allele science",
+        ),
+    ] = None,
+    candidate_profiles: Annotated[
+        str | None,
+        typer.Option(
+            help="Complete chemistry profiles: union, normal, high-gc",
+            rich_help_panel="Allele science",
+        ),
+    ] = None,
+    variant_selection: Annotated[
+        str | None,
+        typer.Option(
+            help="subsets or full-cloud controlled discovery ablation",
+            rich_help_panel="Allele science",
+        ),
+    ] = None,
+    allele_weighting: Annotated[
+        str | None,
+        typer.Option(
+            help="Distinct observed allele classes: distinct-observed",
+            rich_help_panel="Allele science",
+        ),
+    ] = None,
+    discovery_length_mode: Annotated[
+        str | None,
+        typer.Option(
+            help="first-compatible or all profile lengths per row/anchor",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    specificity_terminal_k: Annotated[
+        int | None,
+        typer.Option(
+            help="Common terminal seed length; allele default 17, one substitution, no indels",
+            rich_help_panel="Allele science",
+        ),
+    ] = None,
+    secondary_product_policy: Annotated[
+        str | None,
+        typer.Option(
+            help="ordered-disjoint-intended-sites or reject-secondary-products/v1",
+            rich_help_panel="Allele science",
+        ),
+    ] = None,
+    subset_beam_width: Annotated[
+        int | None,
+        typer.Option(
+            help="Positive subset neighborhood beam width; default 16",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    subset_expansion_limit: Annotated[
+        int | None,
+        typer.Option(
+            help="Positive deterministic subset materialization budget; default 256",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    exchange_width: Annotated[
+        int | None,
+        typer.Option(
+            help="Maximum incumbent configurations per exchange, 0 through 2",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    salvage: Annotated[
+        str | None,
+        typer.Option(
+            help="Experimental dimer salvage: off or bounded; default off",
+            rich_help_panel="Allele salvage",
+        ),
+    ] = None,
+    salvage_max_stages: Annotated[
+        int | None,
+        typer.Option(
+            help="Maximum enabled salvage stages, 1 through 3",
+            rich_help_panel="Allele salvage",
+        ),
+    ] = None,
+    salvage_max_edges_per_pool: Annotated[
+        int | None,
+        typer.Option(
+            help="Cumulative strict-violating physical edges per pool; default 8",
+            rich_help_panel="Allele salvage",
+        ),
+    ] = None,
+    salvage_max_oligos_per_pool: Annotated[
+        int | None,
+        typer.Option(
+            help="Cumulative incident physical species per pool; default 4",
+            rich_help_panel="Allele salvage",
+        ),
+    ] = None,
+    salvage_time_limit: Annotated[
+        float | None,
+        typer.Option(
+            help="Positive finite seconds per salvage tier; default 60",
+            rich_help_panel="Allele salvage",
+        ),
+    ] = None,
+    primary_tier: Annotated[
+        str | None,
+        typer.Option(
+            help="strict or an enabled salvage-1, salvage-2, salvage-3 result",
+            rich_help_panel="Allele salvage",
+        ),
+    ] = None,
+    work_frontier_candidates: Annotated[
+        int | None,
+        typer.Option(
+            help="Deterministic frontier candidates budget; default 64",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    work_construction_candidate_attempts: Annotated[
+        int | None,
+        typer.Option(
+            help="Deterministic construction candidate attempts budget; default 2048",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    work_repair_candidate_probes_per_round: Annotated[
+        int | None,
+        typer.Option(
+            help="Deterministic repair candidate probes per round budget; default 128",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    work_repair_neighborhoods_per_round: Annotated[
+        int | None,
+        typer.Option(
+            help="Deterministic repair neighborhoods per round budget; default 256",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    work_repair_trials_per_round: Annotated[
+        int | None,
+        typer.Option(
+            help="Deterministic repair trials per round budget; default 256",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    work_pool_lookahead_candidates: Annotated[
+        int | None,
+        typer.Option(
+            help="Deterministic pool lookahead candidates budget; default 4",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    work_cleanup_moves_per_round: Annotated[
+        int | None,
+        typer.Option(
+            help="Deterministic cleanup moves per round budget; default 64",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    work_families_per_refresh: Annotated[
+        int | None,
+        typer.Option(
+            help="Deterministic families per refresh budget; default 16",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    salvage_thresholds: Annotated[
+        list[float] | None,
+        typer.Option(
+            "--salvage-threshold",
+            help="Repeat a finite strictly decreasing cutoff below -26; default -28, -30, -32",
+            rich_help_panel="Allele salvage",
+        ),
+    ] = None,
 ):
     """
     Creates a primer panel
     """
-    # Update the config with CLI params
+    # Parameter-source tracking keeps historical defaults out of allele requests.
     params = locals().copy()
-    if selection_algorithm not in {"legacy", "coverage"}:
-        raise typer.BadParameter("--selection-algorithm must be legacy or coverage")
-    if selection_algorithm == "legacy":
-        defaults = {
-            "coverage_metric": "full-span",
-            "coverage_target": 0.90,
-            "optimizer_seed": 0,
-            "optimizer_starts": 4,
-            "optimizer_repair_rounds": 2,
-            "optimizer_time_limit": 120.0,
+    from primalscheme3.panel.allele_options import NEW_OPTION_NAMES
+
+    context = click.get_current_context(silent=True)
+    if context is not None:
+        explicit = {
+            name
+            for name in params
+            if context.get_parameter_source(name)
+            not in (None, click.core.ParameterSource.DEFAULT)
         }
-        changed = [
-            name for name, default in defaults.items() if params[name] != default
-        ]
-        if changed:
-            raise typer.BadParameter(
-                "coverage optimizer options require --selection-algorithm coverage: "
-                + ", ".join("--" + name.replace("_", "-") for name in changed)
-            )
-        if mispriming_product_size not in {None, 0}:
-            raise typer.BadParameter(
-                "nonzero --mispriming-product-size requires --selection-algorithm coverage"
-            )
-        if max_amplicons == 0 or max_amplicons_msa == 0:
-            raise typer.BadParameter(
-                "legacy selection requires positive max-amplicons limits when supplied"
-            )
-        params["mismatch_product_size"] = 0
     else:
-        params["mismatch_product_size"] = (
-            2000 if mispriming_product_size is None else mispriming_product_size
+        defaults = inspect.signature(panel_create).parameters
+        explicit = {
+            name
+            for name, value in params.items()
+            if value is not None and value != defaults[name].default
+        }
+    if selection_algorithm not in {"legacy", "coverage", "allele-coverage"}:
+        raise typer.BadParameter(
+            "--selection-algorithm must be legacy, coverage or allele-coverage"
         )
-        if mode != PanelRunModes.EQUAL:
-            raise typer.BadParameter("coverage selection supports only --mode equal")
-        if max_amplicons_region_group is not None:
-            raise typer.BadParameter(
-                "coverage selection does not support --max-amplicons-region-group"
+    if selection_algorithm == "allele-coverage":
+        requested = {
+            name: params[name] for name in explicit if params[name] is not None
+        }
+        params = {name: value for name, value in params.items() if value is not None}
+        if mispriming_product_size is not None:
+            params["mismatch_product_size"] = mispriming_product_size
+            requested["mismatch_product_size"] = requested.pop(
+                "mispriming_product_size", mispriming_product_size
             )
-    params.pop("mispriming_product_size", None)
+        params.pop("mispriming_product_size", None)
+        params.setdefault("mode", PanelRunModes.EQUAL)
+        params["_allele_requested_options"] = requested
+    else:
+        supplied_new = sorted(
+            name for name in NEW_OPTION_NAMES if params.get(name) is not None
+        )
+        if supplied_new:
+            raise typer.BadParameter(
+                "allele options require --selection-algorithm allele-coverage: "
+                + ", ".join(supplied_new)
+            )
+        params["mode"] = mode if mode is not None else PanelRunModes.REGION_ONLY
+        params["terminal_gap_policy"] = (
+            terminal_gap_policy
+            if terminal_gap_policy is not None
+            else TerminalGapPolicy.LEGACY
+        )
+        params["coverage_metric"] = (
+            coverage_metric if coverage_metric is not None else "full-span"
+        )
+        params["coverage_target"] = (
+            coverage_target if coverage_target is not None else 0.90
+        )
+        if selection_algorithm == "legacy":
+            defaults = {
+                "coverage_metric": "full-span",
+                "coverage_target": 0.90,
+                "optimizer_seed": 0,
+                "optimizer_starts": 4,
+                "optimizer_repair_rounds": 2,
+                "optimizer_time_limit": 120.0,
+            }
+            changed = [
+                name for name, default in defaults.items() if params[name] != default
+            ]
+            if changed:
+                raise typer.BadParameter(
+                    "coverage optimizer options require --selection-algorithm coverage: "
+                    + ", ".join(changed)
+                )
+            if mispriming_product_size not in {None, 0}:
+                raise typer.BadParameter(
+                    "nonzero --mispriming-product-size requires --selection-algorithm coverage"
+                )
+            if max_amplicons == 0 or max_amplicons_msa == 0:
+                raise typer.BadParameter(
+                    "legacy selection requires positive max-amplicons limits when supplied"
+                )
+            params["mismatch_product_size"] = 0
+        else:
+            params["mismatch_product_size"] = (
+                2000 if mispriming_product_size is None else mispriming_product_size
+            )
+            if params["mode"] != PanelRunModes.EQUAL:
+                raise typer.BadParameter(
+                    "coverage selection supports only --mode equal"
+                )
+            if max_amplicons_region_group is not None:
+                raise typer.BadParameter(
+                    "coverage selection does not support --max-amplicons-region-group"
+                )
+        params.pop("mispriming_product_size", None)
     config = create_config_with_amplicon_bounds(params)
+    mode = PanelRunModes(params["mode"])
 
     # Check the output directory
     check_output_dir(output, force)

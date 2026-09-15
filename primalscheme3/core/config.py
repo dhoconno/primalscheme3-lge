@@ -90,7 +90,10 @@ def _validate_raw_coverage_numerics(
 
 def _validate_effective_coverage_numerics(config: "Config") -> None:
     for field, option in _COVERAGE_NUMERIC_OPTIONS.items():
-        if option.coverage_only and config.selection_algorithm != "coverage":
+        if option.coverage_only and config.selection_algorithm not in {
+            "coverage",
+            "allele-coverage",
+        }:
             continue
         value = getattr(config, field)
         if option.expected_type is int:
@@ -205,7 +208,23 @@ class Config:
 
     def __init__(self, **kwargs: Any) -> None:
         self.discovery_workers_by_msa = {}
-        coverage_requested = kwargs.get("selection_algorithm", "legacy") == "coverage"
+        allele_options = None
+        if kwargs.get("selection_algorithm", "legacy") != "allele-coverage":
+            from primalscheme3.panel.allele_options import NEW_OPTION_NAMES
+
+            if any(kwargs.get(name) is not None for name in NEW_OPTION_NAMES):
+                raise ValueError(
+                    "allele options require selection_algorithm=allele-coverage"
+                )
+        if kwargs.get("selection_algorithm") == "allele-coverage":
+            from primalscheme3.panel.allele_options import resolve_allele_options
+
+            allele_options = resolve_allele_options(kwargs)
+            kwargs = kwargs | allele_options.config_values()
+        coverage_requested = kwargs.get("selection_algorithm", "legacy") in {
+            "coverage",
+            "allele-coverage",
+        }
         _validate_raw_coverage_numerics(kwargs, coverage_requested=coverage_requested)
         if coverage_requested:
             # assign_kwargs historically infers conversion from the runtime
@@ -215,9 +234,16 @@ class Config:
                 if option.expected_type is float:
                     setattr(self, field, float(getattr(self, field)))
         self.assign_kwargs(**kwargs)
-        if self.selection_algorithm not in {"legacy", "coverage"}:
-            raise ValueError("selection_algorithm must be legacy or coverage")
-        if self.coverage_metric not in {"full-span", "primer-trimmed"}:
+        if self.selection_algorithm not in {"legacy", "coverage", "allele-coverage"}:
+            raise ValueError(
+                "selection_algorithm must be legacy, coverage or allele-coverage"
+            )
+        allowed_metrics = (
+            {"observed-allele-primer-trimmed"}
+            if allele_options is not None
+            else {"full-span", "primer-trimmed"}
+        )
+        if self.coverage_metric not in allowed_metrics:
             raise ValueError("coverage_metric must be full-span or primer-trimmed")
         if self.terminal_gap_policy == TerminalGapPolicy.OBSERVED_ONLY and (
             self.downsample or self.use_annealing
@@ -284,6 +310,17 @@ class Config:
             self.primer_gc_max = self._primer_gc_default_max
         # Set MisMatch Kmer Size
         self.mismatch_kmersize = self.primer_size_min
+        if allele_options is not None:
+            import json
+
+            for name, value in allele_options.config_values().items():
+                if not hasattr(self, name):
+                    setattr(self, name, value)
+            self.mismatch_kmersize = allele_options.specificity_terminal_k
+            self.allele_options_json = json.dumps(
+                allele_options.to_dict(), sort_keys=True, separators=(",", ":")
+            )
+            self.allele_requested_options_json = allele_options.requested_options_json
         # Set annealing
         if self.use_annealing:
             self.primer_annealing_prop = self._primer_annealing_prop_default

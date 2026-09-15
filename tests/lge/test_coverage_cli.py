@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from importlib.metadata import version
 from pathlib import Path
 from unittest.mock import patch
 
@@ -29,8 +30,8 @@ def test_capabilities_reports_actual_local_engine_and_runtime_identity():
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["schemaVersion"] == "primalscheme3.capabilities/v1"
-    assert payload["toolVersion"] == "3.3.0+lge.3"
-    assert payload["selectionAlgorithms"] == ["legacy", "coverage"]
+    assert payload["toolVersion"] == version("primalscheme3")
+    assert payload["selectionAlgorithms"] == ["legacy", "coverage", "allele-coverage"]
     assert payload["coverage"]["profile"] == {
         "name": "panel-v1",
         "specificityRevision": "intended-sites-v1",
