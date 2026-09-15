@@ -60,6 +60,33 @@ def _mapped_site(target, record):
     return OligoSite(target.id, seq, '+' if forward else '-', anchor, interval, failure)
 
 
+HISTORY_ORIGIN_POLICY = 'grouped-row-origins/v1'
+_ORIGIN_FIELDS = frozenset(('row_index', 'alignment_footprint', 'support', 'row_frequency_weight'))
+
+
+def _group_variant_records(records, target, row_content_digests):
+    """Lossless factoring of identical outcomes, never a scientific filter.
+
+    Every original record is exactly `common | origin` after removing the two
+    catalog dependency aliases from origin. Unequal measurements, check outcomes,
+    frequencies, lengths, reasons or enumeration boundaries cannot coalesce.
+    """
+    groups = {}
+    for record in records:
+        common = {k: v for k, v in record.items() if k not in _ORIGIN_FIELDS}
+        key = canonical_json(common)
+        group = groups.setdefault(key, {'origin_policy': HISTORY_ORIGIN_POLICY, 'common': common, 'origins': []})
+        row_index = record['row_index']
+        origin = {k: v for k, v in record.items() if k in _ORIGIN_FIELDS}
+        origin.update(row_id=target.row_ids[row_index], row_content_digest=row_content_digests[row_index])
+        group['origins'].append(origin)
+    for key in sorted(groups, key=lambda k: (groups[k]['common']['direction'], groups[k]['common']['index'],
+                                            groups[k]['common']['length'], groups[k]['common']['sequence'] or '', k)):
+        group = groups[key]
+        group['origins'] = tuple(sorted(group['origins'], key=lambda o: (o['row_index'], canonical_json(o))))
+        yield group
+
+
 def build_variant_catalog(targets, config, *, profiles=None, indexes=None, history=None, length_mode=None):
     """Build diagnostic and selectable sites, then feasible hybrid anchor families.
 
@@ -84,6 +111,7 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                              for name, p in sorted(profiles.items())},
                 'minimum_frequency': {name: p.min_base_freq for name, p in sorted(profiles.items())},
                 'frequency_policy': VARIANT_FREQUENCY_POLICY,
+                'history_origin_policy': HISTORY_ORIGIN_POLICY,
                 'maximum_alignment_walk': {name: p.primer_max_walk for name, p in sorted(profiles.items())},
                 'enumeration': 'row-anchor-profile-length/v2', 'discovery_length_mode': length_mode,
                 'ambiguous_expansion_limit': 256,
@@ -99,6 +127,7 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
         # entire width into every retained length/anchor record. Hash once per
         # input row; the catalog preserves cells, including gap/missing symbols.
         row_content_digests = tuple(semantic_id('aligned-row-content/v1', row) for row in target.rows)
+        observation_digest = semantic_id('target-row-corpus/v1', row_content_digests)
         for profile_id, profile in sorted(profiles.items()):
             history.emit(stage_id=stage, kind='enumeration-boundary', entity_ids=(target.id,),
                          changes={'profile_id': profile_id, 'policy': resolved, 'row_count': len(target.rows)})
@@ -114,20 +143,20 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                                       'enumerated': profile_indexes, 'reason': 'profile-minimum-length'})
             records, _ = discover(np.array(target.rows), profile, indexes=profile_indexes, variant_mode=True,
                                   discovery_length_mode=length_mode)
-            for record in records:
+            for group in _group_variant_records(records, target, row_content_digests):
+                record = group['common']
                 site = _mapped_site(target, record) if record['sequence'] else None
-                entity_id = site.id if site else semantic_id('failed-footprint', (target.id, profile_id, record))
-                generated = history.emit(stage_id=stage, kind='generated', entity_ids=(entity_id,),
-                                         changes={'profile_id': profile_id, 'row_id': target.row_ids[record['row_index']],
-                                                  'alignment_footprint': record['alignment_footprint'],
-                                                  'length': record['length'], 'reason': record['reason']})
-                raw = {k: v for k, v in record.items() if k not in ('checks', 'accepted')}
+                payload_digest = semantic_id(HISTORY_ORIGIN_POLICY, group)
+                entity_id = site.id if site else semantic_id('failed-footprint-group/v1',
+                                                              (target.id, profile_id, payload_digest))
                 evidence = history.record_evidence(entity_ids=(entity_id,), measurement='row-enumeration',
-                    dependency_key={'target': target.id,
-                                    'row_id': target.row_ids[record['row_index']],
-                                    'row_content_digest': row_content_digests[record['row_index']],
-                                    'profile': profile_id, 'record': raw},
-                    values=raw, status='evaluated' if site else 'unknown')
+                    dependency_key={'target': target.id, 'observation_digest': observation_digest,
+                                    'profile': profile_id, 'origin_payload_digest': payload_digest},
+                    values=group, status='evaluated' if site else 'unknown')
+                generated = history.emit(stage_id=stage, kind='generated', entity_ids=(entity_id,),
+                                         changes={'profile_id': profile_id, 'origin_policy': HISTORY_ORIGIN_POLICY,
+                                                  'origin_count': len(group['origins']),
+                                                  'origin_evidence_id': evidence.id, 'reason': record['reason']})
                 evidence_ids = [evidence.id]
                 check_assessments = []
                 if site:
@@ -155,9 +184,6 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                     evidence_ids=tuple(evidence_ids))
                 if site:
                     previous = sites.get(site.id)
-                    if previous:
-                        history.emit(stage_id=stage, kind='deduplication-alias', entity_ids=(site.id,),
-                                     parent_event_ids=(generated.id,), changes={'row_id': target.row_ids[record['row_index']]})
                     # Chemical acceptance is separate from reference eligibility.
                     chemistry = (profile_id,) if record['accepted'] else ()
                     sites[site.id] = replace(site,

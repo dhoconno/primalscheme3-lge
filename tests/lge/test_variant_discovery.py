@@ -98,7 +98,9 @@ def test_failed_sites_and_aliases_have_history_and_no_sibling_frequency_veto(tmp
         events = [e for e in history.events if site.id in e.entity_ids]
         assert events[0].kind == 'generated'
         assert any(e.kind == 'assessed' for e in events)
-    assert any(e.kind == 'deduplication-alias' for e in history.events)
+    origins = [e.values['origins'] for e in history.evidence
+               if e.measurement == 'row-enumeration' and shared.id in e.entity_ids]
+    assert any({o['row_id'] for o in group} == {'0', '1'} for group in origins)
 
 
 def test_high_gc_short_anchor_does_not_fail_normal_index_validation():
@@ -128,7 +130,7 @@ def test_ambiguous_expansion_has_unknown_support_and_omission_boundary():
     catalog = build_variant_catalog((t,), Config(), length_mode='all', indexes=([len(SHARED)], []), history=history)
     site = next(s for s in catalog.sites if s.sequence == SHARED)
     assert all(binding_support(site, a).status == 'unknown' for a in catalog.observations)
-    assert any(e.values.get('reason') == 'ambiguous-expansion-limit' for e in history.evidence)
+    assert any(e.values.get('common', {}).get('reason') == 'ambiguous-expansion-limit' for e in history.evidence)
 
 
 def test_union_catalog_identity_does_not_depend_on_worker_count_or_profile_order():
@@ -319,8 +321,9 @@ def test_row_dependencies_use_stable_catalog_resolvable_content_digests():
             dependency = evidence.dependency_key
             assert 'row' not in dependency
             stored = catalog.target_by_id[dependency['target']]
-            row_index = stored.row_ids.index(dependency['row_id'])
-            assert dependency['row_content_digest'] == semantic_id('aligned-row-content/v1', stored.rows[row_index])
+            for origin in evidence.values['origins']:
+                row_index = stored.row_ids.index(origin['row_id'])
+                assert origin['row_content_digest'] == semantic_id('aligned-row-content/v1', stored.rows[row_index])
         return records
 
     original = discover_prefix(SHARED + 'A' * 100, 'first')
@@ -330,9 +333,82 @@ def test_row_dependencies_use_stable_catalog_resolvable_content_digests():
     assert original == repeated
     # The changed distal base does not alter measured prefix values, but must
     # invalidate the source dependency even with the same source/row aliases.
-    assert [e.values for e in original] == [e.values for e in distal_change]
+    assert [e.values['common'] for e in original] == [e.values['common'] for e in distal_change]
     assert {e.id for e in original}.isdisjoint(e.id for e in distal_change)
-    assert {e.dependency_key['row_content_digest'] for e in original}.isdisjoint(
-        e.dependency_key['row_content_digest'] for e in distal_change)
+    assert {o['row_content_digest'] for e in original for o in e.values['origins']}.isdisjoint(
+        o['row_content_digest'] for e in distal_change for o in e.values['origins'])
     assert [len(canonical_json(e.dependency_key)) for e in original] == [
         len(canonical_json(e.dependency_key)) for e in long_row]
+
+
+def test_grouped_occurrence_evidence_expands_to_every_primitive_outcome():
+    import json
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog, discovery_profiles
+    from primalscheme3.panel.coverage_history import CoverageHistory
+    from primalscheme3.panel.coverage_types import canonical_json
+    gapped = SHARED[:8] + '-' + SHARED[8:]
+    t = target([gapped, gapped, gapped[:-1] + 'N', 'A' * len(gapped), 'N' * len(gapped), gapped])
+    t = replace(t, rows=t.rows[:-1] + (('',) * len(gapped),))
+    indexes = ([len(gapped)], [0])
+    for mode in ('first-compatible', 'all'):
+        history = CoverageHistory(None, run_id='grouped')
+        config = Config(min_base_freq=.25)
+        catalog = build_variant_catalog((t,), config, indexes=indexes, length_mode=mode, history=history)
+        assert json.loads(catalog.resolved_config_json)['history_origin_policy'] == 'grouped-row-origins/v1'
+        for name, profile in discovery_profiles(config).items():
+            primitive, _ = discover(np.array(t.rows), profile, indexes=indexes, variant_mode=True, discovery_length_mode=mode)
+            groups = [e for e in history.evidence if e.measurement == 'row-enumeration'
+                      and e.dependency_key['profile'] == name]
+            expanded = []
+            for group in groups:
+                assert group.values['origin_policy'] == 'grouped-row-origins/v1'
+                for origin in group.values['origins']:
+                    assert origin['row_id'] == t.row_ids[origin['row_index']]
+                    raw_origin = {k: v for k, v in origin.items() if k not in ('row_id', 'row_content_digest')}
+                    expanded.append(dict(group.values['common']) | raw_origin)
+            assert sorted(map(canonical_json, expanded)) == sorted(map(canonical_json, primitive))
+            assert len(groups) < len(primitive)
+        assert any(len(e.values['origins']) >= 2 for e in history.evidence if e.measurement == 'row-enumeration')
+
+
+def test_grouping_retains_different_common_frequency_decisions():
+    from copy import deepcopy
+    from primalscheme3.panel.coverage_discovery import _group_variant_records
+    from primalscheme3.panel.coverage_types import semantic_id
+    t = target([SHARED, SHARED])
+    records, _ = discover(np.array(t.rows), frequency_config(), indexes=([len(SHARED)], []), variant_mode=True)
+    concrete = [deepcopy(r) for r in records if r['sequence'] == SHARED]
+    assert len(concrete) == 2
+    concrete[1]['checks']['minimum-frequency']['outcome'] = 'fail'
+    concrete[1]['accepted'] = False
+    digests = tuple(semantic_id('aligned-row-content/v1', row) for row in t.rows)
+    groups = list(_group_variant_records(concrete, t, digests))
+    assert len(groups) == 2
+    assert {group['common']['accepted'] for group in groups} == {True, False}
+
+
+def test_compacted_catalog_retains_precompaction_scientific_projection():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    from primalscheme3.panel.coverage_types import semantic_id
+    t = target([NORMAL + 'ATATATATAT' + HIGH, SHARED + 'ATATATATAT' + HIGH, SHARED + 'ATATATATAT' + HIGH])
+    catalog = build_variant_catalog((t,), Config(amplicon_size=55, amplicon_size_min=50, amplicon_size_max=60),
+                                    length_mode='all', indexes=([len(NORMAL)], [len(NORMAL) + 10]))
+    projection = {'targets': catalog.targets, 'observations': catalog.observations,
+                  'sites': [dict(s.to_dict(), intrinsic_evidence_ids=[]) for s in catalog.sites],
+                  'families': [dict(f.to_dict(), geometry_evidence_ids=[]) for f in catalog.families]}
+    # Captured from the preceding ungrouped implementation on this exact fixture.
+    assert semantic_id('discovery-science-projection', projection) == 'discovery-science-projection-c1ecfb4b672475dbc9fcf94d257f83cc237303a525a3ba9c3f381ce9381c2a2f'
+
+
+def test_duplicate_rows_expand_origins_without_multiplying_history_decisions():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    from primalscheme3.panel.coverage_history import CoverageHistory
+    counts = []
+    for copies in (1, 12):
+        history = CoverageHistory(None, run_id='duplicates')
+        build_variant_catalog((target([SHARED] * copies),), Config(), indexes=([len(SHARED)], []), history=history)
+        occurrences = [e for e in history.evidence if e.measurement == 'row-enumeration']
+        assert occurrences and all(len(e.values['origins']) == copies for e in occurrences)
+        assert all(len({o['row_id'] for o in e.values['origins']}) == copies for e in occurrences)
+        counts.append((len(occurrences), len(history.assessments), len(history.events)))
+    assert counts[0] == counts[1]
