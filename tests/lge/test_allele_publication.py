@@ -202,3 +202,26 @@ def test_literal_audit_handles_internal_gap_unknown_and_duplicate_rows(tmp_path)
         (r["observed_bases"], r["covered_bases"]) for r in report["literal_coverage"]
     ) == [(698, 158), (700, 160)]
     assert len(report["literal_coverage"]) == 2
+
+
+def test_bed_name_must_match_fasta_and_order_identity_even_with_updated_hash(tmp_path):
+    from primalscheme3.panel.allele_publication import (
+        audit_allele_stage,
+        artifact_descriptor,
+    )
+
+    stage = tmp_path / "named"
+    publish(stage)
+    bed = stage / "primer.bed"
+    lines = bed.read_text().splitlines()
+    i = next(i for i, line in enumerate(lines) if not line.startswith("#"))
+    cells = lines[i].split("\t")
+    cells[3] = "wrong_configuration_RIGHT_99"
+    lines[i] = "\t".join(cells)
+    bed.write_text("\n".join(lines) + "\n")
+    manifest = json.loads((stage / "stage.json").read_text())
+    manifest["artifacts"]["primer.bed"] = artifact_descriptor(bed, stage)
+    (stage / "stage.json").write_text(json.dumps(manifest))
+    result = audit_allele_stage(stage)
+    assert not result["valid"]
+    assert any(v.get("artifact") == "primer.bed" for v in result["violations"])

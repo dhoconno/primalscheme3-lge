@@ -337,7 +337,7 @@ def audit_allele_stage(directory, *, history=None):
         catalog, ledger, assignments, manifest["references"], manifest["stage_id"]
     )
     for name, expected in texts.items():
-        if name != "primer.bed" and (directory / name).read_text() != expected:
+        if (directory / name).read_text() != expected:
             violations.append(
                 {"reason": "derived-selected-output-mismatch", "artifact": name}
             )
