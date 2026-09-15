@@ -540,3 +540,22 @@ def test_missing_execution_identity_is_not_a_successful_audit(bundle):
         data.pop(key)
     path.write_text(json.dumps(data))
     assert not api().audit_allele_bundle(bundle)["valid"]
+
+
+def test_early_unsafe_history_path_retains_manifest_descriptors(tmp_path):
+    bundle = history_bundle(tmp_path / "bundle")
+    optimizer = bundle / "panel-optimizer.json"
+    data = json.loads(optimizer.read_text())
+    data["history"]["path"] = "../unsafe"
+    optimizer.write_text(json.dumps(data))
+    output = tmp_path / "failure"
+    report = api().run_inspection(
+        "panel-history",
+        bundle,
+        output,
+        argv=["primalscheme3", "panel-history"],
+        entity="site",
+    )
+    assert not report["valid"]
+    provenance = json.loads((output / "provenance.json").read_text())
+    assert any(d["path"] == "panel-optimizer.json" for d in provenance["inputs"])

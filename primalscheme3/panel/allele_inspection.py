@@ -618,6 +618,7 @@ def run_inspection(command, bundle, output, *, argv, **options):
             _contained(bundle, "panel-provenance.json"),
             _contained(bundle, "panel-optimizer.json"),
         ]
+        inputs = [artifact_descriptor(p, bundle) for p in candidates if p.is_file()]
         if (bundle / "panel-optimizer.json").is_file():
             optimizer = _read(bundle / "panel-optimizer.json")
             if command == "panel-history":
