@@ -215,6 +215,10 @@ class CoverageHistory:
         """O(1) latest causal event lookup, maintained on emit and reload."""
         return self._latest_event_by_entity.get(entity_id)
 
+    def iter_events(self, start=0, stop=None):
+        """Iterate a chronological event range without copying a stream slice."""
+        return islice(self._records['events'], start, stop)
+
     def record_evidence(self, *, entity_ids, measurement, dependency_key, values, status):
         return self._append('evidence', IntrinsicEvidence(entity_ids, measurement, dependency_key, values, status))
 
@@ -294,3 +298,367 @@ class CoverageHistory:
         (directory/'snapshot-index.json').write_bytes(data)
         hashes['snapshot-index.json'] = hashlib.sha256(data).hexdigest()
         return hashes
+
+
+# The JSONL implementation above remains the compatibility default. Production
+# runs may explicitly select this disk-backed implementation of the same API.
+import sqlite3
+import zlib
+from collections.abc import Sequence
+from itertools import islice
+
+
+class _DiskSequence(Sequence):
+    def __init__(self, owner, stream):
+        self.owner, self.stream = owner, stream
+
+    def __len__(self):
+        return self.owner._counts[self.stream]
+
+    def __iter__(self):
+        cursor = self.owner._db.execute('SELECT payload FROM records WHERE stream=? ORDER BY ordinal', (self.stream,))
+        for (payload,) in cursor:
+            yield self.owner._decode(self.stream, payload)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return tuple(self[i] for i in range(*index.indices(len(self))))
+        if index < 0:
+            index += len(self)
+        row = self.owner._db.execute('SELECT payload FROM records WHERE stream=? AND ordinal=?', (self.stream, index)).fetchone()
+        if row is None:
+            raise IndexError(index)
+        return self.owner._decode(self.stream, row[0])
+
+
+class _DiskIndex:
+    def __init__(self, owner, stream):
+        self.owner, self.stream = owner, stream
+
+    def get(self, identity, default=None):
+        row = self.owner._db.execute('SELECT payload FROM records WHERE stream=? AND id=?', (self.stream, identity)).fetchone()
+        return self.owner._decode(self.stream, row[0]) if row else default
+
+    def __getitem__(self, identity):
+        result = self.get(identity)
+        if result is None:
+            raise KeyError(identity)
+        return result
+
+
+def _history_hash_start(stream):
+    # Exactly semantic_id('history-'+stream, records), with its array streamed.
+    prefix = '{"canonicalVersion":1,"kind":' + json.dumps('history-' + stream) + ',"semanticFields":['
+    return hashlib.sha256(prefix.encode())
+
+
+class SQLiteCoverageHistory(CoverageHistory):
+    """Compressed, indexed full history with bounded record-storage memory.
+
+    Stream properties are lazy read-only sequences. Every batch, checkpoint(),
+    complete_stage(), and close() commits with SQLite synchronous=FULL. A crash
+    can lose only the current uncommitted batch; completed stages are durable.
+    Reload verifies payload identities, references, indexes and snapshot hashes
+    without materializing full record streams. One writer owns the connection.
+    """
+    def __init__(self, directory: Path, *, run_id: str, batch_size: int = 1000):
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError('batch_size must be a positive integer')
+        self.directory = Path(directory)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.run_id, self.batch_size = run_id, batch_size
+        self.database_path = self.directory / 'history.sqlite'
+        self._db = sqlite3.connect(self.database_path)
+        self._pending = 0
+        self._closed = False
+        self._counts = {name: 0 for name in self._streams}
+        self._hashes = {name: _history_hash_start(name) for name in self._streams}
+        self._records = {name: _DiskSequence(self, name) for name in self._streams}
+        self._indexes = {name: _DiskIndex(self, name) for name in self._streams}
+        try:
+            self._db.execute('PRAGMA foreign_keys=ON')
+            self._db.execute('PRAGMA synchronous=FULL')
+            self._db.execute('PRAGMA journal_mode=DELETE')
+            self._db.execute('PRAGMA cache_size=-8192')
+            self._db.execute('PRAGMA temp_store=FILE')
+            self._db.executescript('''
+                CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS records(
+                    position INTEGER PRIMARY KEY, stream TEXT NOT NULL, ordinal INTEGER NOT NULL,
+                    id TEXT NOT NULL UNIQUE, payload BLOB NOT NULL, stage_id TEXT, pool INTEGER, profile_id TEXT,
+                    UNIQUE(stream, ordinal));
+                CREATE INDEX IF NOT EXISTS records_filter ON records(stream, stage_id, pool, profile_id, ordinal);
+                CREATE TABLE IF NOT EXISTS entity_records(
+                    entity_id TEXT NOT NULL, stream TEXT NOT NULL, ordinal INTEGER NOT NULL,
+                    record_id TEXT NOT NULL REFERENCES records(id), PRIMARY KEY(entity_id, record_id));
+                CREATE INDEX IF NOT EXISTS entity_records_lookup ON entity_records(entity_id, stream, ordinal);
+                CREATE INDEX IF NOT EXISTS entity_records_record ON entity_records(record_id);
+                CREATE TABLE IF NOT EXISTS record_links(
+                    source_id TEXT NOT NULL REFERENCES records(id), target_id TEXT NOT NULL REFERENCES records(id),
+                    kind TEXT NOT NULL, PRIMARY KEY(source_id, target_id, kind));
+                CREATE INDEX IF NOT EXISTS record_links_target ON record_links(target_id, kind, source_id);
+            ''')
+            metadata = dict(self._db.execute('SELECT key,value FROM metadata'))
+            if not metadata:
+                if self._db.execute('SELECT 1 FROM records LIMIT 1').fetchone():
+                    raise ValueError('corrupt history: missing metadata')
+                self._db.executemany('INSERT INTO metadata VALUES (?,?)',
+                    [('schema', 'primalscheme3.sqlite-history/v1'), ('run_id', run_id), ('committed_counts', canonical_json(self._counts))])
+                self._db.commit()
+            elif metadata.get('schema') != 'primalscheme3.sqlite-history/v1' or metadata.get('run_id') != run_id:
+                raise ValueError('history belongs to another run or unsupported schema')
+            self._reload()
+        except Exception:
+            self._db.close()
+            self._closed = True
+            raise
+
+    def _decode(self, stream, payload):
+        try:
+            raw = zlib.decompress(payload)
+            record = self._streams[stream].from_dict(json.loads(raw))
+            if canonical_json(record).encode() != raw:
+                raise ValueError('noncanonical payload')
+            return record
+        except (ValueError, TypeError, KeyError, zlib.error) as exc:
+            raise ValueError('corrupt history payload: ' + stream) from exc
+
+    @staticmethod
+    def _links(record):
+        links = []
+        for attribute, kind, stream in (('evidence_ids', 'evidence', 'evidence'),
+                                       ('assessment_ids', 'assessment', 'assessments'),
+                                       ('parent_event_ids', 'parent', 'events')):
+            links.extend((identity, kind, stream) for identity in getattr(record, attribute, ()))
+        if getattr(record, 'prior_snapshot_id', None) is not None:
+            links.append((record.prior_snapshot_id, 'prior', 'snapshots'))
+        return set(links)
+
+    def _validate_disk_record(self, stream, record, ordinal, *, position=None):
+        if hasattr(record, 'run_id') and record.run_id != self.run_id:
+            raise ValueError('history belongs to another run')
+        if stream == 'events' and record.sequence_number != ordinal:
+            raise ValueError('non-contiguous decision sequence')
+        for identity, kind, expected in self._links(record):
+            row = self._db.execute('SELECT stream,position FROM records WHERE id=?', (identity,)).fetchone()
+            if row is None or row[0] != expected or (position is not None and row[1] >= position):
+                raise ValueError('unknown or forward ' + kind + ' reference')
+        if stream == 'snapshots':
+            self._validate_checkpoint(record)
+
+    def _reload(self):
+        if self._db.execute('PRAGMA integrity_check').fetchone()[0] != 'ok' or self._db.execute('PRAGMA foreign_key_check').fetchone():
+            raise ValueError('corrupt history database/reference')
+        if self._db.execute('SELECT 1 FROM records WHERE stream NOT IN (?,?,?,?) LIMIT 1', tuple(self._streams)).fetchone():
+            raise ValueError('corrupt history stream')
+        for stream in self._streams:
+            for position, ordinal, identity, payload, stage, pool, profile in self._db.execute(
+                    'SELECT position,ordinal,id,payload,stage_id,pool,profile_id FROM records WHERE stream=? ORDER BY ordinal', (stream,)):
+                if ordinal != self._counts[stream]:
+                    raise ValueError('corrupt history ordinal prefix')
+                record = self._decode(stream, payload)
+                if (identity, stage, pool, profile) != (record.id, getattr(record, 'stage_id', None),
+                                                      getattr(record, 'pool', None), getattr(record, 'profile_id', None)):
+                    raise ValueError('corrupt history record index')
+                actual = set(self._db.execute('SELECT entity_id,stream,ordinal FROM entity_records WHERE record_id=?', (identity,)))
+                expected = {(entity, stream, ordinal) for entity in getattr(record, 'entity_ids', ())}
+                if actual != expected:
+                    raise ValueError('corrupt history entity index')
+                links = set(self._db.execute('SELECT target_id,kind FROM record_links WHERE source_id=?', (identity,)))
+                if links != {(target, kind) for target, kind, _ in self._links(record)}:
+                    raise ValueError('corrupt history reference index')
+                self._validate_disk_record(stream, record, ordinal, position=position)
+                self._update_hash(stream, zlib.decompress(payload))
+                self._counts[stream] += 1
+        committed = self._db.execute("SELECT value FROM metadata WHERE key='committed_counts'").fetchone()
+        if committed is None or json.loads(committed[0]) != self._counts:
+            raise ValueError('corrupt history committed prefix counts')
+
+    def _update_hash(self, stream, raw):
+        if self._counts[stream]:
+            self._hashes[stream].update(b',')
+        self._hashes[stream].update(raw)
+
+    def _prefix_digest(self, stream, count):
+        if type(count) is not int or not 0 <= count <= self._counts[stream]:
+            raise ValueError('checkpoint committed prefix is missing: ' + stream)
+        if count == self._counts[stream]:
+            digest = self._hashes[stream].copy()
+        else:
+            digest = _history_hash_start(stream)
+            for ordinal, payload in self._db.execute('SELECT ordinal,payload FROM records WHERE stream=? AND ordinal<? ORDER BY ordinal', (stream, count)):
+                if ordinal:
+                    digest.update(b',')
+                digest.update(zlib.decompress(payload))
+        digest.update(b']}')
+        return 'history-' + stream + '-' + digest.hexdigest()
+
+    def _validate_checkpoint(self, snapshot):
+        for stream in ('evidence', 'assessments', 'events'):
+            count = getattr(snapshot, stream + '_count')
+            if self._prefix_digest(stream, count) != getattr(snapshot, stream + '_digest'):
+                raise ValueError('checkpoint committed prefix hash mismatch: ' + stream)
+        prior = self._indexes['snapshots'].get(snapshot.prior_snapshot_id) if snapshot.prior_snapshot_id else None
+        if snapshot.prior_snapshot_id and (prior is None or prior.completeness != 'complete'):
+            raise ValueError('snapshot inheritance requires complete prior snapshot')
+        if prior and any(getattr(snapshot, s + '_count') < getattr(prior, s + '_count') for s in ('evidence', 'assessments', 'events')):
+            raise ValueError('checkpoint prefixes precede inherited snapshot')
+        for kind, source_stream, source_count, target_count in (
+                ('evidence', 'assessments', snapshot.assessments_count, snapshot.evidence_count),
+                ('assessment', 'events', snapshot.events_count, snapshot.assessments_count),
+                ('parent', 'events', snapshot.events_count, snapshot.events_count)):
+            if self._db.execute('''SELECT 1 FROM record_links l JOIN records s ON s.id=l.source_id
+                    JOIN records t ON t.id=l.target_id WHERE l.kind=? AND s.stream=?
+                    AND s.ordinal<? AND t.ordinal>=? LIMIT 1''', (kind, source_stream, source_count, target_count)).fetchone():
+                raise ValueError('checkpoint references uncommitted prefix')
+        if snapshot.completeness == 'complete':
+            inherited = self._resolved_dispositions(prior) if prior else {}
+            for (entity,) in self._db.execute("SELECT DISTINCT entity_id FROM entity_records WHERE stream='events' AND ordinal<?", (snapshot.events_count,)):
+                if entity not in snapshot.dispositions and entity not in inherited:
+                    raise ValueError('complete snapshot requires disposition for every generated/explored entity')
+            for (entity,) in self._db.execute("SELECT DISTINCT entity_id FROM entity_records WHERE stream='events' AND ordinal>=? AND ordinal<?", (prior.events_count if prior else 0, snapshot.events_count)):
+                if entity not in snapshot.dispositions:
+                    raise ValueError('complete snapshot requires fresh dispositions for touched entities')
+
+    def _append(self, stream, record):
+        existing = self._indexes[stream].get(record.id)
+        if existing is not None:
+            if existing != record:
+                raise ValueError('record identity collision')
+            return existing
+        ordinal = self._counts[stream]
+        self._validate_disk_record(stream, record, ordinal)
+        raw = canonical_json(record).encode()
+        self._db.execute('INSERT INTO records(stream,ordinal,id,payload,stage_id,pool,profile_id) VALUES (?,?,?,?,?,?,?)',
+                         (stream, ordinal, record.id, zlib.compress(raw, level=1), getattr(record, 'stage_id', None),
+                          getattr(record, 'pool', None), getattr(record, 'profile_id', None)))
+        self._db.executemany('INSERT INTO entity_records VALUES (?,?,?,?)',
+                             ((e, stream, ordinal, record.id) for e in set(getattr(record, 'entity_ids', ()))))
+        self._db.executemany('INSERT INTO record_links VALUES (?,?,?)',
+                             ((record.id, target, kind) for target, kind, _ in self._links(record)))
+        self._update_hash(stream, raw)
+        self._counts[stream] += 1
+        self._pending += 1
+        if self._pending >= self.batch_size or stream == 'snapshots':
+            self.checkpoint()
+        return record
+
+    @property
+    def evidence(self): return self._records['evidence']
+
+    @property
+    def assessments(self): return self._records['assessments']
+
+    @property
+    def events(self): return self._records['events']
+
+    @property
+    def snapshots(self): return self._records['snapshots']
+
+    def latest_event(self, entity_id):
+        row = self._db.execute("SELECT r.payload FROM entity_records e JOIN records r ON r.id=e.record_id WHERE e.entity_id=? AND e.stream='events' ORDER BY e.ordinal DESC LIMIT 1", (entity_id,)).fetchone()
+        return self._decode('events', row[0]) if row else None
+
+    def iter_events(self, start=0, stop=None):
+        if type(start) is not int or start < 0 or (stop is not None and (type(stop) is not int or stop < start)):
+            raise ValueError('event range requires nonnegative ordered offsets')
+        cursor = self._db.execute("SELECT payload FROM records WHERE stream='events' AND ordinal>=? AND ordinal<? ORDER BY ordinal",
+                                  (start, self._counts['events'] if stop is None else stop))
+        return (self._decode('events', payload) for (payload,) in cursor)
+
+    def complete_stage(self, *, stage_id, dispositions, catalog_digest, ledger_digest,
+                       prior_snapshot_id=None, completeness='complete'):
+        return self._append('snapshots', StageSnapshot(stage_id, completeness, prior_snapshot_id, dispositions,
+            catalog_digest, ledger_digest, *(self._prefix_digest(s, self._counts[s]) for s in ('evidence', 'assessments', 'events')),
+            *(self._counts[s] for s in ('evidence', 'assessments', 'events'))))
+
+    def checkpoint(self):
+        """Durably commit all current records, including an incomplete stage tail."""
+        self._db.execute("UPDATE metadata SET value=? WHERE key='committed_counts'", (canonical_json(self._counts),))
+        self._db.commit()
+        self._pending = 0
+
+    def close(self):
+        if not self._closed:
+            self.checkpoint()
+            self._db.close()
+            self._closed = True
+
+    def __enter__(self): return self
+
+    def __exit__(self, *exc): self.close()
+
+    def query(self, *, entity_id=None, pool=None, stage_id=None, profile_id=None, include_lineage=False):
+        def filtered(stream, *, assessment=False):
+            terms, args = ['r.stream=?'], [stream]
+            if entity_id is not None:
+                terms.append('EXISTS(SELECT 1 FROM entity_records e WHERE e.record_id=r.id AND e.entity_id=?)')
+                args.append(entity_id)
+            for field, value in (('stage_id', stage_id), ('pool', pool if assessment else None),
+                                  ('profile_id', profile_id if assessment else None)):
+                if value is not None:
+                    terms.append('r.' + field + '=?'); args.append(value)
+            return 'SELECT r.id FROM records r WHERE ' + ' AND '.join(terms), args
+        aq, ap = filtered('assessments', assessment=True)
+        eq, ep = filtered('events')
+        if include_lineage:
+            eq = '''WITH RECURSIVE walk(id) AS (''' + eq + ''' UNION
+                SELECT CASE WHEN l.source_id=w.id THEN l.target_id ELSE l.source_id END
+                FROM record_links l JOIN walk w ON l.source_id=w.id OR l.target_id=w.id
+                WHERE l.kind='parent') SELECT id FROM walk'''
+        assessments = tuple(self._decode('assessments', p) for (p,) in self._db.execute(
+            'SELECT payload FROM records WHERE id IN (' + aq + ') ORDER BY ordinal', ap))
+        events = tuple(self._decode('events', p) for (p,) in self._db.execute(
+            'SELECT payload FROM records WHERE id IN (' + eq + ') ORDER BY ordinal', ep))
+        evidence = tuple(self._decode('evidence', p) for (p,) in self._db.execute('''SELECT r.payload FROM records r
+            WHERE r.stream='evidence' AND (r.id IN (SELECT target_id FROM record_links WHERE kind='evidence'
+            AND source_id IN (''' + aq + ''')) OR EXISTS(SELECT 1 FROM entity_records e WHERE e.record_id=r.id
+            AND e.entity_id=?)) ORDER BY r.ordinal''', [*ap, entity_id]))
+        snapshots = tuple(s for s in self.snapshots if stage_id is None or s.stage_id == stage_id)
+        return dict(evidence=evidence, assessments=assessments, events=events, snapshots=snapshots)
+
+    def export_database(self, path: Path):
+        """Portable, self-contained SQLite backup; no WAL sidecar required."""
+        path = Path(path)
+        if path.resolve() == self.database_path.resolve():
+            raise ValueError('backup path must differ from active database')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.checkpoint()
+        destination = sqlite3.connect(path)
+        try:
+            self._db.backup(destination)
+        finally:
+            destination.close()
+        return _file_sha256(path)
+
+    def export(self, directory: Path):
+        """Stream deterministic gzip JSONL exports without materializing streams."""
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        self.checkpoint()
+        hashes = {}
+        for stream in self._streams:
+            path = directory / (stream + '.jsonl.gz')
+            with path.open('wb') as raw, gzip.GzipFile(filename='', mode='wb', fileobj=raw, mtime=0) as output:
+                for (payload,) in self._db.execute('SELECT payload FROM records WHERE stream=? ORDER BY ordinal', (stream,)):
+                    output.write(zlib.decompress(payload) + b'\n')
+            hashes[path.name] = _file_sha256(path)
+        path = directory / 'snapshot-index.json'
+        with path.open('w') as output:
+            output.write('{')
+            for i, (identity,) in enumerate(self._db.execute("SELECT id FROM records WHERE stream='snapshots' ORDER BY id")):
+                snapshot = self._indexes['snapshots'][identity]
+                if i: output.write(',')
+                output.write(canonical_json(identity) + ':' + canonical_json(dict(stage_id=snapshot.stage_id,
+                    completeness=snapshot.completeness, dispositions=self._resolved_dispositions(snapshot))))
+            output.write('}')
+        hashes[path.name] = _file_sha256(path)
+        return hashes
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
