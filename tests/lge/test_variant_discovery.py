@@ -302,3 +302,37 @@ def test_frequency_denominator_is_footprint_specific_and_reverse_aware():
     short = next(r for r in records if r['sequence'] and r['length'] == len(SHARED) - 1)
     assert short['frequency'] == 1
     assert short['frequency_evidence']['denominator'] == 2
+
+
+def test_row_dependencies_use_stable_catalog_resolvable_content_digests():
+    from primalscheme3.panel.coverage_discovery import build_variant_catalog
+    from primalscheme3.panel.coverage_history import CoverageHistory
+    from primalscheme3.panel.coverage_types import canonical_json, semantic_id
+
+    def discover_prefix(row, run_id):
+        history = CoverageHistory(None, run_id=run_id)
+        catalog = build_variant_catalog((target([row]),), Config(),
+                                        indexes=([len(SHARED)], []), history=history)
+        records = tuple(e for e in history.evidence if e.measurement == 'row-enumeration')
+        assert records
+        for evidence in records:
+            dependency = evidence.dependency_key
+            assert 'row' not in dependency
+            stored = catalog.target_by_id[dependency['target']]
+            row_index = stored.row_ids.index(dependency['row_id'])
+            assert dependency['row_content_digest'] == semantic_id('aligned-row-content/v1', stored.rows[row_index])
+        return records
+
+    original = discover_prefix(SHARED + 'A' * 100, 'first')
+    repeated = discover_prefix(SHARED + 'A' * 100, 'repeat')
+    distal_change = discover_prefix(SHARED + 'A' * 99 + 'C', 'changed')
+    long_row = discover_prefix(SHARED + 'A' * 10000, 'long')
+    assert original == repeated
+    # The changed distal base does not alter measured prefix values, but must
+    # invalidate the source dependency even with the same source/row aliases.
+    assert [e.values for e in original] == [e.values for e in distal_change]
+    assert {e.id for e in original}.isdisjoint(e.id for e in distal_change)
+    assert {e.dependency_key['row_content_digest'] for e in original}.isdisjoint(
+        e.dependency_key['row_content_digest'] for e in distal_change)
+    assert [len(canonical_json(e.dependency_key)) for e in original] == [
+        len(canonical_json(e.dependency_key)) for e in long_row]

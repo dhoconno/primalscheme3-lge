@@ -95,6 +95,10 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
     kernels = {name: version(name) for name in ('primalscheme3', 'primalschemers', 'primer3-py')}
     context_digest = semantic_id('discovery-context', resolved)
     for target in targets:
+        # Bind every event to the authoritative aligned row without copying its
+        # entire width into every retained length/anchor record. Hash once per
+        # input row; the catalog preserves cells, including gap/missing symbols.
+        row_content_digests = tuple(semantic_id('aligned-row-content/v1', row) for row in target.rows)
         for profile_id, profile in sorted(profiles.items()):
             history.emit(stage_id=stage, kind='enumeration-boundary', entity_ids=(target.id,),
                          changes={'profile_id': profile_id, 'policy': resolved, 'row_count': len(target.rows)})
@@ -119,7 +123,9 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                                                   'length': record['length'], 'reason': record['reason']})
                 raw = {k: v for k, v in record.items() if k not in ('checks', 'accepted')}
                 evidence = history.record_evidence(entity_ids=(entity_id,), measurement='row-enumeration',
-                    dependency_key={'target': target.id, 'row': target.rows[record['row_index']],
+                    dependency_key={'target': target.id,
+                                    'row_id': target.row_ids[record['row_index']],
+                                    'row_content_digest': row_content_digests[record['row_index']],
                                     'profile': profile_id, 'record': raw},
                     values=raw, status='evaluated' if site else 'unknown')
                 evidence_ids = [evidence.id]
