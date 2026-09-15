@@ -148,6 +148,10 @@ def run_salvage(
     score_cache=None,
 ):
     options = options or SalvageOptions()
+    if strict.validation.get("stage_policy") != asdict(
+        StagePolicy()
+    ) or strict.metadata.get("stage_policy") != asdict(StagePolicy()):
+        raise ValueError("salvage requires exact strict-stage identity")
     if not strict.validation.get("valid") or any(
         a.stage_id != "strict" for a in strict.assignments
     ):
@@ -292,6 +296,21 @@ def run_salvage(
                     monotonic() - begin,
                 )
             )
+        if result is not None and result.metadata.get("stop_reason") == "cancelled":
+            stop_reason = "cancelled"
+            history.emit(
+                stage_id="salvage",
+                kind="salvage-run-stopped",
+                entity_ids=(),
+                changes={
+                    "reason": "cancelled",
+                    "last_stage": stage_id,
+                    "strict_preserved": True,
+                },
+            )
+            if hasattr(history, "checkpoint"):
+                history.checkpoint()
+            break
     return SalvageRun(strict, tuple(tiers), options, stop_reason)
 
 

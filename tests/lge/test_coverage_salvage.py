@@ -185,3 +185,46 @@ def test_cancellation_before_first_tier_has_durable_reason():
     )
     assert run.stop_reason == "cancelled"
     assert any(e.kind == "salvage-run-stopped" for e in strict.history.events)
+
+
+def test_last_tier_cancellation_is_not_reported_completed():
+    from primalscheme3.panel.coverage_salvage import run_salvage, SalvageOptions
+
+    strict = strict_result()
+    cancel = False
+    emit = strict.history.emit
+
+    def wrapped(**kw):
+        nonlocal cancel
+        if kw["kind"] == "salvage-stage-start":
+            cancel = True
+        return emit(**kw)
+
+    strict.history.emit = wrapped
+    run = run_salvage(
+        strict,
+        profile(),
+        SalvageOptions(mode="bounded", thresholds=(-28,)),
+        cancelled=lambda: cancel,
+    )
+    assert run.tiers[0].result.metadata["stop_reason"] == "cancelled"
+    assert run.stop_reason == "cancelled"
+
+
+def test_empty_salvage_result_cannot_masquerade_as_strict_baseline():
+    from primalscheme3.panel.coverage_salvage import run_salvage, SalvageOptions
+
+    strict = strict_result()
+    first = run_salvage(
+        strict,
+        profile(),
+        SalvageOptions(
+            mode="bounded",
+            thresholds=(-28,),
+            max_edges_per_pool=0,
+            max_oligos_per_pool=0,
+        ),
+    )
+    assert first.tiers[0].result.assignments == ()
+    with pytest.raises(ValueError, match="strict"):
+        run_salvage(first.tiers[0].result, profile(), SalvageOptions(mode="bounded"))
