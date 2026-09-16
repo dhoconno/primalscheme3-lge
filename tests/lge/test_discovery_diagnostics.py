@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 from dataclasses import asdict
 from types import SimpleNamespace
@@ -312,6 +313,32 @@ def test_real_preflight_replay_and_config_binding(tmp_path):
     assert receipt["sourceChangedDuringRun"] is False
     assert receipt["runtimeChangedDuringRun"] is False
     assert all(item["sourceChangedDuringRun"] is False for item in receipt["inputs"])
+
+
+def test_stability_failure_regenerates_final_receipt_hashes(tmp_path, monkeypatch):
+    import primalscheme3.panel.discovery_diagnostics as module
+
+    bundle, source_catalog, _, _ = _real_source_bundle(tmp_path, module)
+    family = source_catalog.families[0]
+    # Exercise the stability-failure branch after the first inventory.  This
+    # models a changed source/runtime/input identity without mutating the
+    # source fixture, and ensures the rewritten report is re-inventoried.
+    monkeypatch.setattr(module, "_receipt_is_stable_success", lambda _: False)
+    output = tmp_path / "unstable-replay"
+    report = module.diagnose_discovery(
+        bundle=bundle, output=output, family_id=family.id
+    )
+    assert report["valid"] is False
+    assert report["scientific"]["membershipMatch"] is True
+    assert report["error"] == "source/runtime/input stability changed during replay"
+    receipt = json.loads((output / "provenance.json").read_text())
+    assert receipt["status"] == "failure"
+    assert receipt["scientific"]["membershipMatch"] is True
+    for item in receipt["outputs"]:
+        path = output / item["path"]
+        assert path.is_file()
+        assert path.stat().st_size == item["size"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == item["sha256"]
 
 
 @pytest.mark.parametrize("tamper", ["input", "catalog", "runtime", "source"])

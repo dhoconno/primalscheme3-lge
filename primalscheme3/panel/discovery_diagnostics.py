@@ -587,45 +587,53 @@ def diagnose_discovery(*, bundle, output, family_id=None, site_id=None, argv=Non
                     "sourceIndex": item["sourceIndex"],
                 }
             )
+        resolved_options = {
+            "family_id": family_id,
+            "site_id": site_id,
+            "history_detail": "full",
+            "sourceResolvedOptions": optimizer.get("options", {}),
+            "replayConfig": config.to_dict() if hasattr(config, "to_dict") else {},
+        }
+        scientific_provenance = {
+            "schemaVersion": SCHEMA,
+            "scope": report["scope"],
+            "membershipMatch": bool(membership_match),
+        }
         receipt = finalize_provenance(
             output_dir=output,
             argv=argv,
-            resolved_options={
-                "family_id": family_id,
-                "site_id": site_id,
-                "history_detail": "full",
-                "sourceResolvedOptions": optimizer.get("options", {}),
-                "replayConfig": config.to_dict() if hasattr(config, "to_dict") else {},
-            },
+            resolved_options=resolved_options,
             inputs=normalized_inputs,
             started_at=started,
             ended_at=monotonic(),
             status="success" if membership_match else "failure",
             exit_status=0 if membership_match else 1,
             stderr="" if membership_match else report["error"],
-            scientific={
-                "schemaVersion": SCHEMA,
-                "scope": report["scope"],
-                "membershipMatch": bool(membership_match),
-            },
+            scientific=scientific_provenance,
             execution_start=execution_start,
         )
         if not _receipt_is_stable_success(receipt) and membership_match:
             report["valid"] = False
             report["status"] = "failure"
-            report["scientific"]["membershipMatch"] = False
             report["error"] = "source/runtime/input stability changed during replay"
             _json_write(output / _REPORT, report)
-            stored_receipt = json.loads((output / "panel-provenance.json").read_text())
-            stored_receipt.update(
-                {
-                    "status": "failure",
-                    "exitStatus": 1,
-                    "stderr": report["error"],
-                }
-            )
-            (output / "panel-provenance.json").write_text(
-                json.dumps(stored_receipt, sort_keys=True, separators=(",", ":")) + "\n"
+            # The report changed after the first inventory.  Re-run the
+            # standard finalizer so its output hash and status describe the
+            # bytes that are actually delivered.  Keep membershipMatch true:
+            # the scientific comparison succeeded; stability is a separate
+            # validity condition.
+            receipt = finalize_provenance(
+                output_dir=output,
+                argv=argv,
+                resolved_options=resolved_options,
+                inputs=normalized_inputs,
+                started_at=started,
+                ended_at=monotonic(),
+                status="failure",
+                exit_status=1,
+                stderr=report["error"],
+                scientific=scientific_provenance,
+                execution_start=execution_start,
             )
         _write_receipt_path(output)
         return report
