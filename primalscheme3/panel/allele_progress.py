@@ -30,9 +30,12 @@ class ProgressWriter:
 class SearchProgress:
     """Uses existing search clock samples; never evaluates compatibility predicates."""
 
-    def __init__(self, search, proposals, stage, observer, begin):
+    def __init__(self, search, proposals, stage, observer, begin, *, policy):
         self.search, self.proposals = search, proposals
         self.stage, self.observer, self.begin = stage, observer, begin
+        self.policy = dict(policy)
+        self.catalog_digest = proposals.catalog.semantic_digest
+        self.interrupted_phase = None
         self.now = self.last_emit = begin
         self.phase = None
         self.latest_improvement = None
@@ -57,6 +60,9 @@ class SearchProgress:
             stage=self.stage,
             elapsed_seconds=max(0, self.now - self.begin),
             active_phase=self.phase,
+            interrupted_phase=self.interrupted_phase,
+            catalog_semantic_digest=self.catalog_digest,
+            stage_policy=dict(self.policy),
             incumbent_id=self.incumbent,
             objective=list(self.search.best_key[:-1]),
             objective_version="soft-observed-allele-coverage/v1",
@@ -72,6 +78,23 @@ class SearchProgress:
         )
         if assignments:
             record["assignments"] = list(self.assignments)
+            # Persist only the selected design definitions. Exact support is
+            # reconstructed from the already retained catalog, not copied here.
+            record["configuration_definitions"] = [
+                {
+                    key: getattr(self.proposals.records[a.candidate_id], key)
+                    for key in (
+                        "id",
+                        "target_id",
+                        "family_id",
+                        "forward_site_ids",
+                        "reverse_site_ids",
+                        "full_interval",
+                        "anchor_pair",
+                    )
+                }
+                for a in self.search.best
+            ]
         self.observer(record)
         self.last_emit = self.now
 
@@ -85,6 +108,21 @@ class SearchProgress:
         self.latest_improvement = max(0, self.now - self.begin)
         self.emit("incumbent-improved", assignments=True)
 
-    def phase_event(self, name, kind, now, **extra):
+    def emit_preserving_error(self, error, kind, **extra):
+        if error is None:
+            self.emit(kind, **extra)
+            return
+        try:
+            self.emit(kind, **extra)
+        except BaseException as observation_error:
+            error.add_note(f"Progress {kind} failed: {observation_error}")
+
+    def phase_event(self, name, kind, now, *, primary_error=None, **extra):
         self.now, self.phase = now, name
-        self.emit(kind, **extra)
+        if extra.get("outcome") in ("failed", "cancelled", "time-limit"):
+            self.interrupted_phase = name
+        try:
+            self.emit_preserving_error(primary_error, kind, **extra)
+        finally:
+            if kind == "phase-finished":
+                self.phase = None

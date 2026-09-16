@@ -246,3 +246,26 @@ def test_real_multitarget_design_selects_and_audits_nonempty_panel(tmp_path):
         for line in (out / "primer.bed").read_text().splitlines()
     )
     assert audit_allele_bundle(out)["valid"]
+
+
+def test_progress_close_failure_preserves_primary_and_pipeline_provenance(
+    tmp_path, monkeypatch
+):
+    from primalscheme3.panel import allele_pipeline
+
+    original = allele_pipeline.ProgressWriter
+
+    class FailedClose(original):
+        def close(self):
+            super().close()
+            raise OSError("injected progress close failure")
+
+    monkeypatch.setattr(allele_pipeline, "ProgressWriter", FailedClose)
+    test_search_failure_retains_complete_discovery_catalog(tmp_path, monkeypatch)
+    receipt = json.loads((tmp_path / "failed-search/panel-provenance.json").read_text())
+    assert receipt["stderr"] == "injected search failure"
+    assert receipt["scientific"]["searchProgress"]["path"] == "search-progress.jsonl"
+    assert any(
+        "injected progress close failure" in note
+        for note in receipt["scientific"]["secondaryErrors"]
+    )

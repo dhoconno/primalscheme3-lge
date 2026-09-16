@@ -192,7 +192,12 @@ stage, elapsed search time, active phase, incumbent ID, exact numeric objective
 terms, per-target coverage, mean coverage, work counters and family cursors.
 Search starts and incumbent improvements include configuration IDs and zero-based
 pool IDs; the incumbent ID also identifies the canonical assignment tie breaker.
-These IDs resolve against the retained configuration ledger. Subsequent records
+Initial/improvement records also retain compact complete selected-site/geometry
+definitions, bound to the catalog semantic digest and explicit stage policy.
+On failure before a final ledger exists, these definitions resolve through the
+already saved `discovery-catalog.json.gz`; derived exact support is recomputed
+from its authoritative records, not serialized in the sidecar. On success the IDs
+also resolve against the retained configuration ledger. Subsequent records
 reference that incumbent. Targets with no assessable classes have null coverage.
 
 Phase transitions and improvements are recorded immediately. Cooperative ticks
@@ -209,3 +214,11 @@ the published stage validation remains authoritative. The append-only log is
 retained on failure and included in the final provenance output hashes. It is not
 a checkpoint or resume format. Programmatic search callers can omit `observer`
 to disable observations; the native pipeline enables them by default.
+
+Observer serialization, writes and flushes consume the existing wall-time budget.
+Deadlines are never paused or extended for logging. Enabled/disabled fixed-work
+runs are equivalent with ample time; wall-limited runs need not select the same
+incumbent when observation costs time. A normally completed terminal record has
+no active phase; interrupted phase identity is retained separately. If reporting
+or cleanup fails while handling a primary failure, the primary exception is
+preserved and secondary error notes are retained in failure provenance.

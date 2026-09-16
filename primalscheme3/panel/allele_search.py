@@ -948,7 +948,7 @@ def search_allele_configurations(
         from .allele_progress import SearchProgress
 
         search.progress_observer = SearchProgress(
-            search, proposals, policy.stage_id, observer, begin
+            search, proposals, policy.stage_id, observer, begin, policy=asdict(policy)
         )
     search.deadline = begin + options.time_limit
     stop = "completed"
@@ -1042,7 +1042,9 @@ def search_allele_configurations(
         stop = "cancelled"
     except BaseException as error:
         if search.progress_observer is not None:
-            search.progress_observer.emit("search-failed", error=str(error))
+            search.progress_observer.emit_preserving_error(
+                error, "search-failed", error_message=str(error)
+            )
         raise
     elapsed = max(0, clock() - begin)
     if search.progress_observer is not None:

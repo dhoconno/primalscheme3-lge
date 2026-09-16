@@ -437,10 +437,14 @@ def run_allele_pipeline(
             invocation_state.provenance_finalized = True
         return optimizer
     except BaseException as error:
-        if progress is not None:
-            progress.close()
-        if history is not None:
-            history.close()
+        for name, resource in (("progress", progress), ("history", history)):
+            if resource is not None:
+                try:
+                    resource.close()
+                except BaseException as cleanup_error:
+                    error.add_note(f"{name} close failed: {cleanup_error}")
+        if getattr(error, "__notes__", None):
+            scientific["secondaryErrors"] = list(error.__notes__)
         logger.exception("Allele-aware panel failed")
         finalize_provenance(
             output_dir=output_dir,

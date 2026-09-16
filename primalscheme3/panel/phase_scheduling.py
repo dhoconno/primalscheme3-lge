@@ -75,6 +75,7 @@ class PhaseScheduler:
         )
         if search.progress_observer is not None:
             search.progress_observer.phase_event(name, "phase-started", begin)
+        primary_error = None
         try:
             search.tick()
             item["outcome"] = action() or "completed"
@@ -83,13 +84,15 @@ class PhaseScheduler:
         except _PhaseLimit:
             item["outcome"] = "phase-time-limit"
         except (_TimeLimit, _Cancelled) as error:
+            primary_error = error
             item["outcome"] = (
                 "time-limit" if isinstance(error, _TimeLimit) else "cancelled"
             )
             if self.active_at_stop is None:
                 self.active_at_stop = name
             raise
-        except BaseException:
+        except BaseException as error:
+            primary_error = error
             item["outcome"] = "failed"
             raise
         finally:
@@ -131,5 +134,6 @@ class PhaseScheduler:
                 search.progress_observer.phase_event(
                     name, "phase-finished", begin + item["elapsed_seconds"],
                     outcome=item["outcome"],
+                    primary_error=primary_error,
                 )
         return item["outcome"]
