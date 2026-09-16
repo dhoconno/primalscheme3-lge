@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import math
+import pickle
+import zlib
 from collections import Counter, OrderedDict, defaultdict
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
@@ -732,6 +734,29 @@ class SelectedSiteSpecificityChecker(SpecificityChecker):
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _DiagnosticCacheEntry:
+    """Trusted self-produced, process-local storage; never an artifact format.
+
+    Pickle preserves native tuple/list shapes and sharing within a diagnostic.
+    Each unpack returns an isolated mutable result. No external or persisted
+    pickle is accepted: only capture() creates entries used by the oracle.
+    """
+
+    reasons: tuple[str, ...]
+    payload: bytes
+
+    @classmethod
+    def capture(cls, result):
+        return cls(
+            tuple(result["reasons"]),
+            zlib.compress(pickle.dumps(result, protocol=5), level=1),
+        )
+
+    def unpack(self):
+        return pickle.loads(zlib.decompress(self.payload))
+
+
 class AlleleCompatibilityOracle:
     """Memoized exact subset predicates; pool exposure is an aggregate guard."""
 
@@ -920,7 +945,7 @@ class AlleleCompatibilityOracle:
 
     def candidate_diagnostics(self, cid):
         if self.cache and cid in self._candidates:
-            return deepcopy(self._candidates[cid])
+            return self._candidates[cid].unpack()
         reasons, chemistry = [], {}
         checks = {
             name: "not-evaluated"
@@ -1000,12 +1025,12 @@ class AlleleCompatibilityOracle:
                     reasons.append("specificity")
         result["reasons"] = sorted(set(reasons))
         if self.cache:
-            self._candidates[cid] = deepcopy(result)
+            self._candidates[cid] = _DiagnosticCacheEntry.capture(result)
         return result
 
     def candidate_valid(self, cid):
         if self.cache and cid in self._candidates:
-            return not self._candidates[cid]["reasons"]
+            return not self._candidates[cid].reasons
         return not self.candidate_diagnostics(cid)["reasons"]
 
     def candidate_reasons(self, cid):
@@ -1014,7 +1039,7 @@ class AlleleCompatibilityOracle:
     def pair_diagnostics(self, a_id, b_id):
         key = tuple(sorted((a_id, b_id)))
         if self.cache and key in self._pairs:
-            return deepcopy(self._pairs[key])
+            return self._pairs[key].unpack()
         reasons = []
         result = {
             "reasons": reasons,
@@ -1061,13 +1086,13 @@ class AlleleCompatibilityOracle:
                 reasons.append("specificity")
         result["reasons"] = sorted(set(reasons))
         if self.cache:
-            self._pairs[key] = deepcopy(result)
+            self._pairs[key] = _DiagnosticCacheEntry.capture(result)
         return result
 
     def conflict(self, a, b):
         key = tuple(sorted((a, b)))
         if self.cache and key in self._pairs:
-            return bool(self._pairs[key]["reasons"])
+            return bool(self._pairs[key].reasons)
         return bool(self.pair_diagnostics(a, b)["reasons"])
 
     def conflict_reasons(self, a, b):

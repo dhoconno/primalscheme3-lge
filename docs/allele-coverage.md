@@ -267,3 +267,16 @@ causes recomputation. Target fractions are not cached. This internal bound has
 no CLI control and does not change search work counters or deadlines. Cache work
 is charged to real elapsed time: fixed-work results with ample time are unchanged,
 while a wall-limited run may explore more work and choose another incumbent.
+
+### Diagnostic cache memory
+
+The selected-site oracle retains unary and pair verdicts for the lifetime of a
+search. Their full diagnostics use private compressed in-memory entries, with a
+small reasons tuple for boolean checks. Reading diagnostics returns a new,
+independent object. This changes storage only: no entries are evicted, no
+scientific checks are skipped or recomputed because of compression, and complete
+canonical evidence/history stays in the existing portable JSON/SQLite formats.
+The internal representation is trusted process-local pickle protocol5 with zlib
+level1; it is never read from or written to a scientific artifact. Fresh final
+validation remains independent of these optimizer caches. Compression reduces
+retained payload size but does not impose a total search-memory bound.

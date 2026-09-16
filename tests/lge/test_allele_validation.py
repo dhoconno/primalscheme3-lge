@@ -300,7 +300,7 @@ def test_fresh_validation_does_not_trust_oracle_cache_or_observations():
     )
     oracle = a.AlleleCompatibilityOracle(cat, ledger, profile(), policy)
     assert oracle.conflict(x.id, y.id)
-    oracle._pairs[tuple(sorted((x.id, y.id)))] = {"reasons": []}
+    oracle._pairs[tuple(sorted((x.id, y.id)))] = a._DiagnosticCacheEntry.capture({"reasons": []})
     assert not oracle.conflict(x.id, y.id)
     result = a.validate_allele_assignments(
         cat,
