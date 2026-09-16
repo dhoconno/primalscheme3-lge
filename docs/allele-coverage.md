@@ -105,3 +105,33 @@ whole pending batch and reloads the durable prefix. Relation-write or commit
 errors also roll back the pending batch. Callers must not continue using record
 objects returned from a batch that was rolled back. The bounded entity-key cache
 belongs to one writer and is cleared on rollback and close.
+
+
+### Phase scheduling
+
+`--phase-scheduling serial|reserved` defaults to `serial`. The opt-in `reserved`
+policy (`initial-phase-reservations/v1`) reserves the initial cycle's remaining
+time among full/normal seeds (20% combined), subset construction (40%), and
+repair (40%). Disabled groups are omitted and weights normalized. Seed modes
+and repair rounds divide their group's share equally. Unused time flows forward.
+Within each initial repair round, preparation, cleanup, and exchange/refill get
+20%, 20%, and 60%. Later starts use the remaining global budget in serial order.
+
+Reservations are cooperative: an indivisible proposal batch or scientific
+predicate may overrun a window. The hard global deadline and cancellation take
+precedence at the next check, and the best validated incumbent remains retained.
+This offers construction and exchange opportunities when operations fit; it does
+not guarantee an improvement or completed repair. Serial remains the default
+until same-catalog measurements support changing it.
+
+Each stage records the resolved `scheduling_policy`, `phase_progress` (outcomes,
+work/proposal deltas, cursors, budgets, elapsed time and local overshoot), omitted
+phases, the active phase at global stop, and global deadline overshoot. Outcomes
+distinguish `work-cap`, `exhausted`, `no-eligible-work`, `phase-time-limit`, global
+`time-limit`, and `cancelled`. Exhaustion refers to the named bounded phase or
+family stream, never all possible variant subsets. `completed_seed_modes` means
+returned bounded passes; `exhausted_seed_modes` separately identifies exhausted
+seed streams. `fixed_work_completed` requires every requested bounded phase to
+finish without any time or cancellation cutoff; reaching a deterministic work
+cap is permitted. Phase lifecycle history events preserve status even without a
+coverage improvement. These events introduce no synthetic primer entities.

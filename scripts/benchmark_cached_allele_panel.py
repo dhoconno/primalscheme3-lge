@@ -164,6 +164,7 @@ def arm_manifest():
     base = {
         "candidate_profiles": "union",
         "variant_selection": "subsets",
+        "phase_scheduling": "serial",
         "optimizer_seed": 0,
         "optimizer_starts": 1,
         "optimizer_repair_rounds": 2,
@@ -339,7 +340,8 @@ def frozen_identity(capabilities, executable, inputs, wrapper):
 def completed_fixed_work(metadata):
     options = metadata["options"]
     return (
-        metadata.get("stop_reason") == "completed"
+        metadata.get("fixed_work_completed", True) is True
+        and metadata.get("stop_reason") == "completed"
         and metadata.get("completed_starts") == options["starts"]
         and metadata.get("completed_repair_rounds")
         == options["starts"] * options["repair_rounds"]

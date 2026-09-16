@@ -25,6 +25,7 @@ NEW_OPTION_NAMES = frozenset(
         "candidate_profiles",
         "reuse_discovery",
         "variant_selection",
+        "phase_scheduling",
         "allele_weighting",
         "discovery_length_mode",
         "specificity_terminal_k",
@@ -61,6 +62,7 @@ class AlleleOptions:
     preset: str = PRESET
     candidate_profiles: str = "union"
     reuse_discovery: str | None = None
+    phase_scheduling: str = "serial"
     variant_selection: str = "subsets"
     allele_weighting: str = "distinct-observed"
     discovery_length_mode: str = "first-compatible"
@@ -113,6 +115,7 @@ class AlleleOptions:
             "preset": (PRESET,),
             "candidate_profiles": ("union", "normal", "high-gc"),
             "variant_selection": ("full-cloud", "subsets"),
+            "phase_scheduling": ("serial", "reserved"),
             "allele_weighting": ("distinct-observed",),
             "discovery_length_mode": ("first-compatible", "all"),
             "coverage_metric": ("observed-allele-primer-trimmed",),
@@ -232,6 +235,7 @@ class AlleleOptions:
                 **{name: getattr(self, "work_" + name) for name in WORK_DEFAULTS}
             ),
             variant_selection=self.variant_selection,
+            phase_scheduling=self.phase_scheduling,
         )
 
     def salvage_options(self):

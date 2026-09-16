@@ -17,6 +17,8 @@ from typing import Any
 
 from primalscheme3.core.logger import close_owned_file_handlers
 
+from .phase_scheduling import scheduling_policy
+
 CAPABILITIES_SCHEMA = "primalscheme3.capabilities/v1"
 PROVENANCE_SCHEMA = "primalscheme3.panel-provenance/v1"
 
@@ -153,6 +155,12 @@ def capabilities_document() -> dict[str, Any]:
         "toolVersion": version("primalscheme3"),
         "selectionAlgorithms": ["legacy", "coverage", "allele-coverage"],
         "alleleCoverage": {
+            "phaseScheduling": {
+                "default": "serial",
+                "policies": {
+                    name: scheduling_policy(name) for name in ("serial", "reserved")
+                },
+            },
             "sourceContractVersion": "3.3.0+lge.4",
             "algorithm": "bounded-allele-coverage/v1",
             "metric": "observed-allele-primer-trimmed/v1",

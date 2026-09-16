@@ -578,6 +578,13 @@ def panel_create(
             rich_help_panel="Allele compute",
         ),
     ] = None,
+    phase_scheduling: Annotated[
+        str | None,
+        typer.Option(
+            help="Phase scheduling: serial or reserved",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
     variant_selection: Annotated[
         str | None,
         typer.Option(

@@ -6,40 +6,41 @@ search_allele_assignments, which owns real kernels and fresh final validation.
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict, deque, OrderedDict
-from dataclasses import asdict, dataclass, field, replace
-from functools import cached_property
-from importlib.metadata import version
 import json
 import math
+from collections import Counter, OrderedDict, defaultdict, deque
+from dataclasses import asdict, dataclass, field, replace
+from functools import cached_property, partial
+from importlib.metadata import version
 from statistics import mean
 from time import monotonic
 
-from .coverage_types import (
-    Assignment,
-    AlleleAssignment,
-    VariantCatalog,
-    ConfigurationLedger,
-    CoverageSummary,
-    semantic_id,
-)
-from .coverage_search import _Search, _TimeLimit, _Cancelled, _signature, _canonical
-from .coverage_variants import (
-    make_configuration,
-    propose_configurations,
-    ConfigurationIneligible,
-    SubsetLimits,
-    ProposalContext,
-    ProposalWitness,
-)
-from .allele_coverage import configuration_coverage, allele_summary, coverage_utility
-from .coverage_history import CoverageHistory
+from .allele_coverage import allele_summary, configuration_coverage, coverage_utility
 from .allele_validation import (
+    AlleleCompatibilityOracle,
     AlleleConstraintProfile,
     StagePolicy,
-    AlleleCompatibilityOracle,
     validate_allele_assignments,
 )
+from .coverage_history import CoverageHistory
+from .coverage_search import _Cancelled, _canonical, _Search, _signature, _TimeLimit
+from .coverage_types import (
+    AlleleAssignment,
+    Assignment,
+    ConfigurationLedger,
+    CoverageSummary,
+    VariantCatalog,
+    semantic_id,
+)
+from .coverage_variants import (
+    ConfigurationIneligible,
+    ProposalContext,
+    ProposalWitness,
+    SubsetLimits,
+    make_configuration,
+    propose_configurations,
+)
+from .phase_scheduling import PhaseScheduler, Reservation, scheduling_policy
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,7 @@ class AlleleSearchOptions:
     requested_amplicon_size: int | None = None
     work_limits: AlleleWorkLimits = field(default_factory=AlleleWorkLimits)
     seed_modes: tuple[str, ...] = ("full", "normal")
+    phase_scheduling: str = "serial"
     variant_selection: str = "subsets"
 
     def __post_init__(self):
@@ -112,6 +114,8 @@ class AlleleSearchOptions:
             mode not in ("full", "normal") for mode in self.seed_modes
         ):
             raise ValueError("seed_modes may contain full and normal once each")
+        if self.phase_scheduling not in ("serial", "reserved"):
+            raise ValueError("phase_scheduling must be serial or reserved")
         if self.variant_selection not in ("subsets", "full-cloud"):
             raise ValueError("variant_selection must be subsets or full-cloud")
         object.__setattr__(self, "seed_modes", tuple(self.seed_modes))
@@ -684,7 +688,7 @@ class _Proposals:
     def neighborhoods(self, search, state, start, round_index):
         """Prioritize retained-family variant edits, then numerical conflict witnesses."""
         if self.options.variant_selection == "full-cloud":
-            return
+            return "no-eligible-work"
         proposed = set()
         context = semantic_id(
             "incumbent", [(a.candidate_id, a.pool) for a in state.items()]
@@ -716,6 +720,7 @@ class _Proposals:
                 continue
             search.tick()
             probes += 1
+            self.work["contextual_probes"] += 1
             config = self.records[cid]
             if config.family_id in proposed:
                 continue
@@ -732,6 +737,7 @@ class _Proposals:
                         break
                     search.tick()
                     probes += 1
+                    self.work["contextual_probes"] += 1
                     if search.conflict(cid, other):
                         diagnostics.append(self.oracle.pair_diagnostics(cid, other))
             for report in diagnostics:
@@ -766,7 +772,12 @@ class _Proposals:
                     context_digest=context,
                 )
                 proposed.add(config.family_id)
-        self.work["contextual_probes"] += probes
+        if (
+            probes >= self.options.work_limits.repair_candidate_probes_per_round
+            or len(proposed) >= limit
+        ):
+            return "work-cap"
+        return "exhausted" if probes or proposed else "no-eligible-work"
 
     def ledger(self):
         return ConfigurationLedger(
@@ -941,6 +952,21 @@ def search_allele_configurations(
         for mode in options.seed_modes
         if options.variant_selection != "full-cloud" or mode == "full"
     )
+    scheduler = PhaseScheduler(search, proposals, history, policy.stage_id)
+    reserved = options.phase_scheduling == "reserved"
+    initial_weight = (
+        (0.2 if seed_modes else 0) + 0.4 + (0.4 if options.repair_rounds else 0)
+    )
+    initial = Reservation(search.deadline, initial_weight) if reserved else None
+    planned = ["seed:" + mode for mode in seed_modes]
+    for start in range(options.starts):
+        planned.append(f"construction:{start}")
+        for round_index in range(options.repair_rounds):
+            planned.extend(
+                f"repair:{start}:{round_index}/{part}"
+                for part in ("preparation", "cleanup", "exchange")
+            )
+    exhausted_seeds = []
     try:
         if empty_summary.status == "no-assessable-targets":
             stop = "no-assessable-targets"
@@ -948,22 +974,68 @@ def search_allele_configurations(
             for mode in seed_modes:
                 proposals.mode = mode
                 state = search.state()
-                search.fill(state, 0, "seed:" + mode)
-                seeds_completed.append(mode)
+                outcome = scheduler.run(
+                    "seed:" + mode,
+                    partial(search.fill, state, 0, "seed:" + mode),
+                    initial,
+                    0.2 / len(seed_modes),
+                )
+                if outcome != "phase-time-limit":
+                    seeds_completed.append(mode)
+                if outcome == "exhausted":
+                    exhausted_seeds.append(mode)
             proposals.mode = "expanded"
             for start in range(options.starts):
                 state = search.state()
-                search.fill(state, start, f"construction:{start}")
-                starts += 1
+                outcome = scheduler.run(
+                    f"construction:{start}",
+                    partial(search.fill, state, start, f"construction:{start}"),
+                    initial if start == 0 else None,
+                    0.4,
+                )
+                if outcome != "phase-time-limit":
+                    starts += 1
                 for round_index in range(options.repair_rounds):
-                    search.repair(start, round_index)
-                    repairs += 1
+                    # Reserve the first cycle only. Subsequent starts retain the
+                    # same deterministic serial order and share the remainder.
+                    if initial is not None and start == 0:
+                        repair_end = initial.cutoff(
+                            clock(), 0.4 / options.repair_rounds
+                        )
+                        subphase = Reservation(repair_end, 1.0)
+                    else:
+                        subphase = None
+                    outcomes = []
+                    for part, weight, action in (
+                        (
+                            "preparation",
+                            0.2,
+                            partial(search.prepare_repair, start, round_index),
+                        ),
+                        (
+                            "cleanup",
+                            0.2,
+                            partial(search.cleanup, f"cleanup:{start}:{round_index}"),
+                        ),
+                        ("exchange", 0.6, partial(search.exchange, start, round_index)),
+                    ):
+                        outcomes.append(
+                            scheduler.run(
+                                f"repair:{start}:{round_index}/{part}",
+                                action,
+                                subphase,
+                                weight,
+                            )
+                        )
+                    if "phase-time-limit" not in outcomes:
+                        repairs += 1
     except _TimeLimit:
         stop = "time-limit"
     except _Cancelled:
         stop = "cancelled"
     elapsed = max(0, clock() - begin)
     search.deadline = math.inf
+    search.phase_deadline = math.inf
     validation = search.check(search.best)
     if not validation["valid"]:
         search.best = retained_baseline
@@ -1001,6 +1073,22 @@ def search_allele_configurations(
         "completed_starts": starts,
         "completed_repair_rounds": repairs,
         "completed_seed_modes": seeds_completed,
+        "exhausted_seed_modes": exhausted_seeds,
+        "scheduling_policy": scheduling_policy(options.phase_scheduling),
+        "phase_progress": scheduler.progress,
+        "phases_not_entered": [
+            name
+            for name in planned
+            if name not in {p["phase"] for p in scheduler.progress}
+        ],
+        "active_phase_at_stop": scheduler.active_at_stop,
+        "deadline_overshoot_seconds": max(0.0, elapsed - options.time_limit),
+        "fixed_work_completed": stop == "completed"
+        and all(p["outcome"] != "phase-time-limit" for p in scheduler.progress),
+        "family_streams_exhausted": {
+            mode: cursor >= len(proposals.families)
+            for mode, cursor in proposals.cursors.items()
+        },
         "effective_seed_modes": list(seed_modes),
         "work_truncated": bool(
             search.work["construction_limit_hits"]

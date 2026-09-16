@@ -224,7 +224,11 @@ def test_real_tiny_cache_freeze_panel_and_audit(tmp_path):
     assert "WRONG" not in json.dumps(report)
     assert arm["resolvedOptions"]["variant_selection"] == "full-cloud"
     assert arm["audit"]["exitStatus"] == 0
-    assert arm["boundReceipts"]
+    bound_paths = {item["path"] for item in arm["boundReceipts"]}
+    assert "runs/normal-full-1/panel/panel-provenance.json" in bound_paths
+    assert "runs/normal-full-1/audit/provenance.json" in bound_paths
+    assert "runs/normal-full-1/panel/provenance.json" not in bound_paths
+    assert arm["resolvedOptions"]["phase_scheduling"] == "serial"
     assert (output / "runs/normal-full-1/panel/config.json").is_file()
 
 

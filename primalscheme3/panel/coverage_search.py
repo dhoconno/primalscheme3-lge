@@ -227,6 +227,10 @@ class _TimeLimit(Exception):
     pass
 
 
+class _PhaseLimit(Exception):
+    pass
+
+
 class _Cancelled(Exception):
     pass
 
@@ -281,6 +285,7 @@ class _Search:
             }
         )
         self.deadline = math.inf
+        self.phase_deadline = math.inf
         self.best = ()
         self.best_key = self.state().key()
         self.history = [{"phase": "empty", "objective": list(self.best_key[:-1])}]
@@ -302,8 +307,11 @@ class _Search:
     def tick(self):
         if self.deadline < math.inf and self.cancelled is not None and self.cancelled():
             raise _Cancelled
-        if self.clock() >= self.deadline:
+        now = self.clock()
+        if now >= self.deadline:
             raise _TimeLimit
+        if now >= self.phase_deadline:
+            raise _PhaseLimit
 
     def valid(self, ident):
         if ident not in self.valid_cache:
@@ -456,7 +464,7 @@ class _Search:
                     queues, priority = self.queues(state, start, attempted)
                     positions = {target: 0 for target in queues}
                     continue
-                return
+                return "exhausted"
             active.sort(
                 key=lambda target: (
                     state.fraction(target),
@@ -556,13 +564,15 @@ class _Search:
             self.record(state, phase)
         self.work["construction_limit_hits"] += 1
 
+        return "work-cap"
+
     def cleanup(self, phase):
         moves = 0
         for ident in sorted(a.candidate_id for a in self.best):
             for destination in [-1, *range(self.profile.n_pools)]:
                 self.tick()
                 if moves >= self.limits["cleanup_moves_per_round"]:
-                    return
+                    return "work-cap"
                 current = self.state(self.best)
                 if ident not in current.assignments:
                     break
@@ -581,12 +591,28 @@ class _Search:
                 if self.record(trial, phase):
                     self.repairs_accepted += 1
 
-    def repair(self, start, round_index):
+        return "exhausted" if moves else "no-eligible-work"
+
+    def prepare_repair(self, start, round_index):
         if self.neighborhood_hook is not None:
             self.tick()
-            self.neighborhood_hook(self, self.state(self.best), start, round_index)
-            self.ids = tuple(sorted(self.catalog.candidate_by_id))
+            try:
+                return (
+                    self.neighborhood_hook(
+                        self, self.state(self.best), start, round_index
+                    )
+                    or "completed"
+                )
+            finally:
+                self.ids = tuple(sorted(self.catalog.candidate_by_id))
+        return "completed"
+
+    def repair(self, start, round_index):
+        self.prepare_repair(start, round_index)
         self.cleanup(f"cleanup:{start}:{round_index}")
+        return self.exchange(start, round_index)
+
+    def exchange(self, start, round_index):
         initial = self.state(self.best)
         # Consider deficits first, but also fully covered targets: burden,
         # count and pool balance remain objective terms after reaching goal.
@@ -611,7 +637,7 @@ class _Search:
                 continue
             if probes >= self.limits["repair_candidate_probes_per_round"]:
                 self.work["repair_limit_hits"] += 1
-                break
+                return "work-cap"
             probes += 1
             self.work["repair_candidate_probes"] += 1
             if not self.valid(ident):
@@ -641,7 +667,7 @@ class _Search:
                             or trials >= self.limits["repair_trials_per_round"]
                         ):
                             self.work["repair_limit_hits"] += 1
-                            return
+                            return "work-cap"
                         neighborhoods += 1
                         self.work["repair_neighborhoods"] += 1
                         removed = tuple(sorted((*mandatory, *extra)))
@@ -661,7 +687,7 @@ class _Search:
                             self.tick()
                             if trials >= self.limits["repair_trials_per_round"]:
                                 self.work["repair_limit_hits"] += 1
-                                return
+                                return "work-cap"
                             trials += 1
                             self.work["repair_trials"] += 1
                             trial = self.state(retained)
@@ -693,6 +719,8 @@ class _Search:
                         break
                 if improved:
                     break
+
+        return "exhausted" if probes else "no-eligible-work"
 
 
 def search_assignments(
