@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import platform
-import resource
 import shlex
 import subprocess
 import sys
@@ -46,42 +45,34 @@ def stamp(path: Path) -> dict[str, object]:
     return {"path": str(path.resolve()), "sha256": digest, "sizeBytes": path.stat().st_size}
 
 
-def canonical_bed(path: Path) -> list[tuple[str, int, int, str, str]]:
+def canonical_bed(path: Path) -> list[tuple[str, int, int, str, str, str]]:
     rows = []
     for line in path.read_text().splitlines():
         if not line or line.startswith("#"):
             continue
         fields = line.split("\t")
-        rows.append((fields[0], int(fields[1]), int(fields[2]), fields[5], fields[6] if len(fields) > 6 else ""))
+        # Keep pool, strand and sequence; generated amplicon names are ignored.
+        rows.append((fields[0], int(fields[1]), int(fields[2]), fields[4], fields[5], fields[6] if len(fields) > 6 else ""))
     return sorted(rows)
 
 
 def strict_fingerprint(panel: Path) -> str:
     """Fingerprint coordinate/sequence rows while ignoring generated names."""
-    audit = panel / "legacy-salvage.json"
-    if audit.exists():
-        payload = json.loads(audit.read_text())
-        strict_ids = set(payload.get("strictCandidateIds", ()))
-        rows = []
-        for item in payload.get("candidateManifest", ()):
-            if item.get("candidateId") not in strict_ids:
-                continue
-            chrom = str(item["targetOccurrence"])
-            full_start, full_end = item["fullInterval"]
-            trim_start, trim_end = item["trimmedInterval"]
-            for sequence in item.get("forwardOligos", ()):
-                rows.append((chrom, int(full_start), int(trim_start), "+", str(sequence)))
-            for sequence in item.get("reverseOligos", ()):
-                rows.append((chrom, int(trim_end) - len(sequence), int(full_end), "-", str(sequence)))
-        rows = sorted(rows)
-    else:
-        rows = canonical_bed(panel / "primer.bed")
+    rows = canonical_bed(panel / ("strict-primer.bed" if (panel / "strict-primer.bed").exists() else "primer.bed"))
     return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
 
 
 def geometry(panel: Path) -> dict[str, object]:
     """Use the established evaluator's interval convention on each output."""
-    result = {}
+    refs = {}
+    current = None
+    for line in (panel / "reference.fasta").read_text().splitlines():
+        if line.startswith(">"):
+            current = line[1:].split()[0]
+            refs[current] = ""
+        elif current is not None:
+            refs[current] += line.strip().replace("-", "")
+    result = {"referenceLengths": {name: len(seq) for name, seq in refs.items()}}
     for rel, key in (("amplicon.bed", "fullSpan"), ("primertrim.amplicon.bed", "primerTrimmedInterior")):
         rows = [x.split("\t") for x in (panel / rel).read_text().splitlines() if x and not x.startswith("#")]
         by_chrom = {}
@@ -89,13 +80,16 @@ def geometry(panel: Path) -> dict[str, object]:
             by_chrom.setdefault(row[0], []).append((int(row[1]), int(row[2])))
         result[key] = {}
         for chrom, intervals in sorted(by_chrom.items()):
+            if chrom not in refs:
+                raise ValueError(f"{rel}: output target {chrom!r} missing from reference.fasta")
             merged = []
             for start, end in sorted(intervals):
                 if merged and start <= merged[-1][1]:
                     merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
                 else:
                     merged.append((start, end))
-            result[key][chrom] = {"intervals": [list(x) for x in merged], "unionBases": sum(e - s for s, e in merged)}
+            bases = sum(e - s for s, e in merged)
+            result[key][chrom] = {"intervals": [list(x) for x in merged], "unionBases": bases, "referenceLength": len(refs[chrom]), "percentReferenceCovered": 100 * bases / len(refs[chrom])}
     return result
 
 
@@ -113,6 +107,17 @@ def prepare() -> Path:
         actual = stamp(path)
         if actual["sha256"] != digest or actual["sizeBytes"] != size:
             raise RuntimeError(f"input receipt mismatch: {path}")
+    baseline_config = json.loads((BASELINE / "panel/config.json").read_text())
+    expected = {
+        "selection_algorithm": "legacy", "mode": "equal", "mapping": "first",
+        "amplicon_size": 200, "amplicon_size_min": 150, "amplicon_size_max": 250,
+        "n_pools": 2, "dimer_score": -26.0, "terminal_gap_policy": "legacy",
+        "high_gc": False, "min_base_freq": 0.0, "use_matchdb": True,
+        "mismatch_product_size": 0, "circular": False,
+    }
+    drift = {key: (baseline_config.get(key), value) for key, value in expected.items() if baseline_config.get(key) != value}
+    if drift:
+        raise RuntimeError(f"baseline config drift: {drift}")
     OUT.mkdir(parents=True)
     manifest = {
         "schemaVersion": "lge.mhc-a1-a2-legacy-salvage-benchmark/v1",
@@ -135,18 +140,39 @@ def run_one(name: str, argv: list[str]) -> dict[str, object]:
     output = Path(argv[argv.index("--output") + 1])
     started = time.monotonic()
     started_at = datetime.now(timezone.utc).isoformat()
-    proc = subprocess.run(argv, cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True)
+    proc = subprocess.Popen(argv, cwd=Path(__file__).resolve().parents[1], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    peak_rss = 0
+    deadline = started + 600
+    try:
+        import psutil
+    except ImportError:
+        psutil = None
+    while proc.poll() is None:
+        if psutil is not None:
+            try:
+                process = psutil.Process(proc.pid)
+                peak_rss = max(peak_rss, process.memory_info().rss)
+                peak_rss = max(peak_rss, *(child.memory_info().rss for child in process.children(recursive=True)))
+            except psutil.Error:
+                pass
+        if time.monotonic() >= deadline or peak_rss > 8 * 1024**3:
+            os.killpg(proc.pid, 9)
+            break
+        time.sleep(0.25)
+    stdout, stderr = proc.communicate()
+    if proc.returncode is None:
+        proc.wait()
     elapsed = time.monotonic() - started
     output.mkdir(parents=True, exist_ok=True)
-    (output / "stdout.txt").write_text(proc.stdout)
-    (output / "stderr.txt").write_text(proc.stderr)
-    receipt = {"name": name, "argv": argv, "command": shlex.join(argv), "startedAt": started_at, "wallTimeSeconds": elapsed, "exitStatus": proc.returncode, "stderr": proc.stderr, "rssBytes": resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss, "runtime": {"python": sys.version, "platform": platform.platform()}, "inputs": [stamp(x) for x in MSAS], "outputs": [stamp(x) for x in sorted(output.rglob("*")) if x.is_file()]}
+    (OUT / f"{name}.stdout.log").write_text(stdout)
+    (OUT / f"{name}.stderr.log").write_text(stderr)
+    receipt = {"name": name, "argv": argv, "command": shlex.join(argv), "startedAt": started_at, "wallTimeSeconds": elapsed, "exitStatus": proc.returncode, "stderr": stderr, "rssBytes": peak_rss, "runtime": {"python": sys.version, "platform": platform.platform()}, "inputs": [stamp(x) for x in MSAS], "outputs": [stamp(x) for x in sorted(output.rglob("*")) if x.is_file()]}
     if (output / "primer.bed").exists():
         receipt["strictFingerprintOrFinalFingerprint"] = strict_fingerprint(output)
         receipt["geometry"] = geometry(output)
     if (output / "legacy-salvage.json").exists():
         receipt["salvage"] = json.loads((output / "legacy-salvage.json").read_text())
-    (output / "benchmark-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    (OUT / f"{name}.benchmark-receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
     return receipt
 
 
