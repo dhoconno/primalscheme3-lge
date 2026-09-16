@@ -374,6 +374,11 @@ class _PoolEvaluations:
         return not result["reasons"]
 
 
+# Bound memory per live state even when queue ordering visits the whole catalog.
+# Zero is reserved for uncached regression tests; no public tuning option.
+_GAIN_CACHE_LIMIT = 8192
+
+
 class _AlleleState:
     """Exact observed-base contribution counts; removals preserve other contributors."""
 
@@ -385,6 +390,7 @@ class _AlleleState:
             options,
             pools,
         )
+        self._gain_cache = OrderedDict()
         self.assignments = {}
         self.pools = [set() for _ in range(profile.n_pools)]
         self.oligos = [set() for _ in range(profile.n_pools)]
@@ -434,6 +440,20 @@ class _AlleleState:
         return value if value is not None else 0.0
 
     def gain(self, candidate):
+        if _GAIN_CACHE_LIMIT <= 0:
+            return self._uncached_gain(candidate)
+        try:
+            value = self._gain_cache[candidate.id]
+        except KeyError:
+            value = self._uncached_gain(candidate)
+            self._gain_cache[candidate.id] = value
+            if len(self._gain_cache) > _GAIN_CACHE_LIMIT:
+                self._gain_cache.popitem(last=False)
+        else:
+            self._gain_cache.move_to_end(candidate.id)
+        return value
+
+    def _uncached_gain(self, candidate):
         before = self._fraction(candidate.target_id)
         if before is None:
             return 0.0
@@ -463,6 +483,7 @@ class _AlleleState:
             - candidate.full_interval[0]
             - self.requested_size
         )
+        self._gain_cache.clear()
 
     def drop(self, candidate):
         pool = self.assignments.pop(candidate.id)
@@ -481,6 +502,7 @@ class _AlleleState:
             - candidate.full_interval[0]
             - self.requested_size
         )
+        self._gain_cache.clear()
 
     def vector(self):
         fractions = tuple(self.fraction(tid) for tid in sorted(self.by_target))

@@ -259,3 +259,11 @@ incumbent when observation costs time. A normally completed terminal record has
 no active phase; interrupted phase identity is retained separately. If reporting
 or cleanup fails while handling a primary failure, the primary exception is
 preserved and secondary error notes are retained in failure provenance.
+
+Allele search memoizes candidate gains in an instance-owned LRU of at most 8,192
+entries per live search state. Each value uses the unchanged exact class-weighted
+gain calculation. Every successful add/drop clears the cache; eviction only
+causes recomputation. Target fractions are not cached. This internal bound has
+no CLI control and does not change search work counters or deadlines. Cache work
+is charged to real elapsed time: fixed-work results with ample time are unchanged,
+while a wall-limited run may explore more work and choose another incumbent.
