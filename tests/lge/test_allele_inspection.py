@@ -702,3 +702,44 @@ def test_custom_catalog_is_hashed_and_changes_during_query_fail(tmp_path, monkey
     assert not api().run_inspection(
         "panel-history", bundle, tmp_path / "changed", argv=["query"], region=(0, 200)
     )["valid"]
+
+
+def test_legacy_missing_intended_policy_audits_as_exact_supported(bundle):
+    from primalscheme3.panel.allele_publication import artifact_descriptor
+
+    stage = bundle / 'stages/strict'
+    manifest = json.loads((stage / 'stage.json').read_text())
+    manifest['constraints'].pop('intended_product_policy')
+    saved = json.loads((stage / 'validation.json').read_text())
+    saved['profile'].pop('intended_product_policy')
+    saved.pop('allowed_intended_products')
+    saved.pop('allowed_intended_product_count')
+    (stage / 'validation.json').write_text(json.dumps(saved))
+    manifest['artifacts']['validation.json'] = artifact_descriptor(stage / 'validation.json', stage)
+    (stage / 'stage.json').write_text(json.dumps(manifest))
+    optimizer = json.loads((bundle / 'panel-optimizer.json').read_text())
+    optimizer['profile'].pop('intended_product_policy')
+    optimizer['options'].pop('intended_product_policy')
+    (bundle / 'panel-optimizer.json').write_text(json.dumps(optimizer))
+    provenance = json.loads((bundle / 'panel-provenance.json').read_text())
+    for item in provenance['outputs']:
+        item.update(artifact_descriptor(bundle / item['path'], bundle))
+    (bundle / 'panel-provenance.json').write_text(json.dumps(provenance))
+    report = api().audit_allele_bundle(bundle)
+    assert report['valid'], report['violations']
+    assert report['stages']['strict']['profile']['intended_product_policy'] == 'exact-supported'
+
+
+def test_bundle_rejects_disagreeing_intended_policy_option_even_with_updated_hash(bundle):
+    from primalscheme3.panel.allele_publication import artifact_descriptor
+
+    optimizer = json.loads((bundle / 'panel-optimizer.json').read_text())
+    optimizer['options']['intended_product_policy'] = 'concrete-designated-sites'
+    (bundle / 'panel-optimizer.json').write_text(json.dumps(optimizer))
+    provenance = json.loads((bundle / 'panel-provenance.json').read_text())
+    for item in provenance['outputs']:
+        item.update(artifact_descriptor(bundle / item['path'], bundle))
+    (bundle / 'panel-provenance.json').write_text(json.dumps(provenance))
+    report = api().audit_allele_bundle(bundle)
+    assert not report['valid']
+    assert any(v['reason'] == 'intended-product-policy-mismatch' for v in report['violations'])

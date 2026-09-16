@@ -333,6 +333,20 @@ def audit_allele_stage(directory, *, history=None):
         authoritative_targets=targets,
         history=history,
     )
+    if "validation.json" in manifest["artifacts"]:
+        saved = _read(directory / "validation.json")
+        # Historical stages omit this additive collection and mean exact-only.
+        if (
+            json.dumps(saved.get("allowed_intended_products", []), sort_keys=True)
+            != json.dumps(report["allowed_intended_products"], sort_keys=True)
+            or saved.get("allowed_intended_product_count", 0)
+            != report["allowed_intended_product_count"]
+        ):
+            violations.append({"reason": "saved-intended-products-mismatch"})
+        saved_profile = dict(saved.get("profile", {}))
+        saved_profile.setdefault("intended_product_policy", "exact-supported")
+        if saved_profile != report["profile"]:
+            violations.append({"reason": "saved-validation-profile-mismatch"})
     texts, _ = _render(
         catalog, ledger, assignments, manifest["references"], manifest["stage_id"]
     )

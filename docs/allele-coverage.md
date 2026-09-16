@@ -28,6 +28,7 @@ Repeat `--msa` for each target. Output must be a new directory. Supply the origi
 | `--discovery-length-mode` | `first-compatible` | `all` examines all allowed lengths instead of stopping at the first individually compatible length per row, anchor and profile. This can be expensive. |
 | `--specificity-terminal-k` | `17` | Changes the terminal seed used for supplied-row specificity screening. Comparisons must account for primer lengths and use a shared eligible catalog. |
 | `--mispriming-product-size` | `2000` | Upper product length screened on supplied rows; positive inclusive bound. This mode does not permit disabling screening with zero. |
+| `--intended-product-policy` | `exact-supported` | Opt-in `concrete-designated-sites` tolerates known potential products at the selected sites’ own concrete row footprints, without adding coverage. See below. |
 | `--secondary-product-policy` | `ordered-disjoint-intended-sites` | Allows the declared class of products between ordered disjoint intended sites, without coverage credit. `reject-secondary-products/v1` rejects secondary products. |
 | `--max-amplicons`, `--max-amplicons-msa` | Uncapped | Limits physical design size; caps may reduce achievable coverage. |
 
@@ -136,3 +137,49 @@ seed streams. `fixed_work_completed` requires every requested bounded phase to
 finish without any time or cancellation cutoff; reaching a deterministic work
 cap is permitted. Phase lifecycle history events preserve status even without a
 coverage improvement. These events introduce no synthetic primer entities.
+
+
+### Optional designated-site screening
+
+`--intended-product-policy concrete-designated-sites` changes only how potential
+products at the intended locus are classified during supplied-row screening.
+The default `exact-supported` requires a full-length exact F/R match on the same
+row for an ordinary intended-product exemption.
+
+The opt-in policy also permits a screened near-match when both oligos belong to
+one complete selected configuration, hit their own designated projected full
+footprints on the same target row in the correct orientation and order, and both
+full footprints are observed A/C/G/T. Every endpoint must agree; a shifted repeat,
+similar span, wrong orientation, other target, missing/N/IUPAC footprint, or a
+terminal seed whose full primer extends beyond supplied sequence remains blocked.
+Terminal screening still uses the configured k with at most one substitution;
+it does not constrain mismatches outside that terminal segment.
+
+These permitted near-matches add **zero coverage**. Coverage still requires
+full-primer exact same-row support, with the original distinct-allele weighting.
+The reference amplicon-size limits and positive inclusive screening product bound
+are unchanged. Pair checks require a complete certificate from A or B; combining
+one end from each configuration or borrowing a third cannot rescue a product.
+The separate secondary-product rule continues to use exact-supported certificates.
+
+Native profile/resolved options and stage constraints record
+`intended_product_policy`; capability descriptors identify
+`exact-supported/v1` and `concrete-designated-sites/v1`. Missing historical fields
+mean `exact-supported`. Neither old artifacts nor the existing preset are silently
+changed. This post-discovery control permits scientifically compatible catalog
+reuse and changes the selection/validation profile identity.
+
+Candidate/pair evidence and validation report `allowed_intended_products`
+separately from `allowed_secondary_products`. Each newly permitted product records
+its complete selected-site certificate, row footprints, observed templates, and
+full-primer mismatch positions split into terminal/outside-terminal positions
+(zero-based in synthesis orientation), with `coverage_credit: 0`. Validation's
+`allowed_intended_product_count` counts contextual witnesses, which may repeat a
+physical product across candidate/pair checks. Fresh audit reconstructs these
+certificates from authoritative rows and checks the saved evidence and policy.
+History inspection preserves those linked records.
+
+This opt-in interpretation is not an amplification-probability or laboratory
+specificity claim. Compare it explicitly against `exact-supported` using the same
+catalog, search controls and source/runtime identity; a coverage increase would
+not establish a global optimum or experimental performance.

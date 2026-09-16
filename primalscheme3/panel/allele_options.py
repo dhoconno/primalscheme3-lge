@@ -30,6 +30,7 @@ NEW_OPTION_NAMES = frozenset(
         "discovery_length_mode",
         "specificity_terminal_k",
         "secondary_product_policy",
+        "intended_product_policy",
         "subset_beam_width",
         "subset_expansion_limit",
         "exchange_width",
@@ -80,6 +81,7 @@ class AlleleOptions:
     specificity_terminal_k: int = 17
     mismatch_product_size: int = 2000
     secondary_product_policy: str = "ordered-disjoint-intended-sites"
+    intended_product_policy: str = "exact-supported"
     optimizer_seed: int = 0
     optimizer_starts: int = 4
     optimizer_repair_rounds: int = 2
@@ -120,6 +122,7 @@ class AlleleOptions:
             "discovery_length_mode": ("first-compatible", "all"),
             "coverage_metric": ("observed-allele-primer-trimmed",),
             "salvage": ("off", "bounded"),
+            "intended_product_policy": ("exact-supported", "concrete-designated-sites"),
             "secondary_product_policy": (
                 "ordered-disjoint-intended-sites",
                 "reject-secondary-products/v1",

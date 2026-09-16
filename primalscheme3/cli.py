@@ -613,6 +613,13 @@ def panel_create(
             rich_help_panel="Allele science",
         ),
     ] = None,
+    intended_product_policy: Annotated[
+        str | None,
+        typer.Option(
+            help="exact-supported (default) or concrete-designated-sites; near-matches add no coverage",
+            rich_help_panel="Allele science",
+        ),
+    ] = None,
     secondary_product_policy: Annotated[
         str | None,
         typer.Option(

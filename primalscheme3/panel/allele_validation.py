@@ -52,6 +52,7 @@ class AlleleConstraintProfile:
     secondary_product_policy: str = "ordered-disjoint-intended-sites"
     max_amplicons: int | None = None
     max_amplicons_msa: int | None = None
+    intended_product_policy: str = "exact-supported"
 
     def __post_init__(self):
         for name in (
@@ -73,6 +74,11 @@ class AlleleConstraintProfile:
             "reject-secondary-products/v1",
         ):
             raise ValueError("unknown secondary product policy")
+        if self.intended_product_policy not in (
+            "exact-supported",
+            "concrete-designated-sites",
+        ):
+            raise ValueError("unknown intended product policy")
         for name in ("max_amplicons", "max_amplicons_msa"):
             value = getattr(self, name)
             if value is not None and (type(value) is not int or value < 0):
@@ -90,6 +96,10 @@ class AlleleConstraintProfile:
             )
         if config.dimer_score != -26:
             raise ValueError("strict dimer baseline must be -26")
+        kwargs.setdefault(
+            "intended_product_policy",
+            getattr(config, "intended_product_policy", "exact-supported"),
+        )
         return cls(
             config.amplicon_size_min,
             config.amplicon_size_max,
@@ -198,10 +208,26 @@ class _SelectedView:
     forward_oligos: tuple[str, ...]
     reverse_oligos: tuple[str, ...]
     selected_site_ids: tuple[str, ...]
+    forward_site_ids: tuple[str, ...]
+    reverse_site_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AlleleSpecificityResult(SpecificityResult):
+    allowed_intended_products: tuple[dict, ...] = ()
 
 
 class SelectedSiteSpecificityChecker(SpecificityChecker):
     """Pair-local complete certificates; compatible N/IUPAC never exemptions."""
+
+    def __init__(self, catalog, profile, *, cache=True):
+        super().__init__(catalog, profile, cache=cache)
+        self._projected_sites = {}
+        self._observed_rows = {
+            (allele.target_id, row): allele
+            for allele in catalog.observations
+            for row in allele.row_ids
+        }
 
     def _view(self, config):
         return _SelectedView(
@@ -210,6 +236,8 @@ class SelectedSiteSpecificityChecker(SpecificityChecker):
             tuple(self.catalog.site_by_id[x].sequence for x in config.forward_site_ids),
             tuple(self.catalog.site_by_id[x].sequence for x in config.reverse_site_ids),
             config.forward_site_ids + config.reverse_site_ids,
+            config.forward_site_ids,
+            config.reverse_site_ids,
         )
 
     def _index_terminals(self):
@@ -375,9 +403,99 @@ class SelectedSiteSpecificityChecker(SpecificityChecker):
             (self._view(a), self._view(b)), sa | sb, frozenset(secondary), {}
         )
 
+    def _concrete_projection(self, site, allele):
+        """Project the selected occurrence itself; mismatching IUPAC is not concrete."""
+        key = (site.id, allele.id)
+        if self.cache and key in self._projected_sites:
+            return self._projected_sites[key]
+        binding = binding_support(site, allele)
+        cells = tuple(allele.cells[i] for i in binding.alignment_footprint)
+        result = None
+        if (
+            binding.row_footprint is not None
+            and len(cells) == len(site.sequence)
+            and all(cell in ("A", "C", "G", "T") for cell in cells)
+        ):
+            observed = "".join(cells)
+            if site.strand == "-":
+                observed = reverse_complement(observed)
+            mismatches = [
+                i
+                for i, (base, cell) in enumerate(
+                    zip(site.sequence, observed, strict=True)
+                )
+                if base != cell
+            ]
+            boundary = len(site.sequence) - self.profile.mismatch_kmersize
+            result = {
+                "site_id": site.id,
+                "expected_footprint": list(binding.row_footprint),
+                "oligo": site.sequence,
+                "observed_template": observed,
+                "mismatch_positions": mismatches,
+                "terminal_mismatch_positions": [i for i in mismatches if i >= boundary],
+                "outside_terminal_mismatch_positions": [
+                    i for i in mismatches if i < boundary
+                ],
+            }
+        if self.cache:
+            self._projected_sites[key] = result
+        return result
+
+    def _designated_certificate(self, candidates, witness):
+        if self.profile.intended_product_policy != "concrete-designated-sites":
+            return None
+        allele = self._observed_rows.get((witness["target_id"], witness["row_id"]))
+        if allele is None or witness["plus"]["end"] > witness["minus"]["start"]:
+            return None
+        # A complete certificate must belong to A OR B. Never combine ends from
+        # different configurations, nor use species-wide witness.site_ids.
+        for candidate in sorted(candidates, key=lambda c: c.id):
+            if candidate.target_id != witness["target_id"]:
+                continue
+            ends = {}
+            for side, strand in (("plus", "+"), ("minus", "-")):
+                hit = witness[side]
+                if hit["orientation"] != strand or hit["classification"] in (
+                    "ambiguous",
+                    "uncertain-footprint",
+                ):
+                    break
+                selected = (
+                    candidate.forward_site_ids
+                    if strand == "+"
+                    else candidate.reverse_site_ids
+                )
+                for sid in sorted(selected):
+                    site = self.catalog.site_by_id[sid]
+                    if (
+                        site.target_id != candidate.target_id
+                        or site.strand != strand
+                        or site.sequence != hit["oligo"]
+                    ):
+                        continue
+                    projected = self._concrete_projection(site, allele)
+                    if projected is not None and projected["expected_footprint"] == [
+                        hit["start"],
+                        hit["end"],
+                    ]:
+                        ends[side] = projected
+                        break
+            if len(ends) == 2:
+                return {
+                    "configuration_id": candidate.id,
+                    "target_id": candidate.target_id,
+                    "row_id": witness["row_id"],
+                    "forward_site_id": ends["plus"]["site_id"],
+                    "reverse_site_id": ends["minus"]["site_id"],
+                    "forward": deepcopy(ends["plus"]),
+                    "reverse": deepcopy(ends["minus"]),
+                }
+        return None
+
     def _evaluate(self, candidates, declared, secondary, support):
         result = super()._evaluate(candidates, declared, secondary, support)
-        rejected, allowed = [], []
+        rejected, allowed, intended_allowed = [], [], []
 
         def identified(witness):
             sequences = {witness[side]["oligo"] for side in ("plus", "minus")}
@@ -397,6 +515,25 @@ class SelectedSiteSpecificityChecker(SpecificityChecker):
             }
 
         for witness in result.rejected_products:
+            certificate = self._designated_certificate(candidates, witness)
+            if certificate is not None:
+                permitted = witness | {
+                    "site_ids": (
+                        certificate["forward_site_id"],
+                        certificate["reverse_site_id"],
+                    ),
+                    "classification": "nonexact-designated-intended-product",
+                    "reason": "concrete-designated-sites",
+                    "policy_id": "concrete-designated-sites/v1",
+                    "certificate": certificate,
+                    "uncertain": False,
+                    "coverage_credit": 0,
+                }
+                intended_allowed.append(
+                    permitted
+                    | {"id": semantic_id("selected-site-product-witness", permitted)}
+                )
+                continue
             witness = identified(witness)
             uncertain = any(
                 witness[side]["classification"] in ("ambiguous", "uncertain-footprint")
@@ -415,7 +552,9 @@ class SelectedSiteSpecificityChecker(SpecificityChecker):
         for witness in result.allowed_secondary_products:
             witness = identified(witness)
             allowed.append(witness | {"uncertain": False, "coverage_credit": 0})
-        return SpecificityResult(tuple(rejected), tuple(allowed), support)
+        return AlleleSpecificityResult(
+            tuple(rejected), tuple(allowed), support, tuple(intended_allowed)
+        )
 
 
 class AlleleCompatibilityOracle:
@@ -620,6 +759,7 @@ class AlleleCompatibilityOracle:
             "rejected_products": [],
             "uncertainty_blocks": [],
             "allowed_secondary_products": [],
+            "allowed_intended_products": [],
             "dimer_edges": [],
         }
         c = self.configurations.get(cid)
@@ -667,6 +807,9 @@ class AlleleCompatibilityOracle:
                 specificity = self.specificity.intrinsic(rebuilt)
                 result.update(
                     support=specificity.support,
+                    allowed_intended_products=list(
+                        specificity.allowed_intended_products
+                    ),
                     rejected_products=list(specificity.rejected_products),
                     allowed_secondary_products=list(
                         specificity.allowed_secondary_products
@@ -702,6 +845,7 @@ class AlleleCompatibilityOracle:
             "reasons": reasons,
             "rejected_products": [],
             "allowed_secondary_products": [],
+            "allowed_intended_products": [],
             "uncertainty_blocks": [],
             "dimer_edges": [],
             "checks": {
@@ -730,6 +874,7 @@ class AlleleCompatibilityOracle:
             result.update(
                 rejected_products=list(specificity.rejected_products),
                 allowed_secondary_products=list(specificity.allowed_secondary_products),
+                allowed_intended_products=list(specificity.allowed_intended_products),
                 uncertainty_blocks=[
                     p for p in specificity.rejected_products if p["uncertain"]
                 ],
@@ -948,6 +1093,7 @@ def validate_allele_assignments(
     accepted = []
     support = {}
     allowed = []
+    intended_allowed = []
     uncertainty = []
     pools = {}
     kernels = {name: version(name) for name in ("primalschemers", "primer3-py")}
@@ -965,6 +1111,9 @@ def validate_allele_assignments(
                 }
             )
         uncertainty.extend(result.get("uncertainty_blocks", []))
+        intended_allowed.extend(
+            dict(p, pool=pool) for p in result.get("allowed_intended_products", [])
+        )
         allowed.extend(
             dict(p, pool=pool) for p in result.get("allowed_secondary_products", [])
         )
@@ -1070,6 +1219,7 @@ def validate_allele_assignments(
                     p for p in specificity.rejected_products if p["uncertain"]
                 ],
                 allowed_secondary_products=list(specificity.allowed_secondary_products),
+                allowed_intended_products=list(specificity.allowed_intended_products),
             )
             result["checks"]["specificity"] = (
                 "fail" if specificity.rejected_products else "pass"
@@ -1129,6 +1279,8 @@ def validate_allele_assignments(
         "support_diagnostics": support,
         "selected_sites": output,
         "allowed_secondary_products": allowed,
+        "allowed_intended_products": intended_allowed,
+        "allowed_intended_product_count": len(intended_allowed),
         "uncertainty_blocks": uncertainty,
         "pools": pools,
         "catalog_semantic_digest": fresh.semantic_digest,

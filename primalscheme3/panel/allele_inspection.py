@@ -561,6 +561,27 @@ def audit_allele_bundle(bundle, *, tier=None):
         targets = ()
         raw_reparsed = False
         violations.append({"reason": "raw-input-reparse", "error": str(exc)})
+    # Missing historical fields mean the original exact-supported policy.
+    optimizer_profile = dict(optimizer.get("profile", {}))
+    optimizer_profile.setdefault("intended_product_policy", "exact-supported")
+    effective_intended = optimizer_profile["intended_product_policy"]
+    option_sources = [config, optimizer.get("options", {})]
+    if config.get("allele_options_json"):
+        option_sources.append(json.loads(config["allele_options_json"]))
+    if "resolvedOptions" in provenance:
+        option_sources.append(provenance["resolvedOptions"])
+    scientific = provenance.get("scientific", {})
+    for key in ("profile", "resolvedAlleleOptions"):
+        if key in scientific:
+            option_sources.append(scientific[key])
+    if effective_intended not in (
+        "exact-supported",
+        "concrete-designated-sites",
+    ) or any(
+        value.get("intended_product_policy", "exact-supported") != effective_intended
+        for value in option_sources
+    ):
+        violations.append({"reason": "intended-product-policy-mismatch"})
     expected_metric = "observed-allele-primer-trimmed/v1"
     if (
         optimizer.get("metric") != expected_metric
@@ -605,7 +626,7 @@ def audit_allele_bundle(bundle, *, tier=None):
                     {"reason": "stage-scientific-validation", "stage": name}
                 )
             if (
-                report["profile"] != optimizer.get("profile")
+                report["profile"] != optimizer_profile
                 or report["coverage"]["metric_id"] != expected_metric
             ):
                 violations.append(

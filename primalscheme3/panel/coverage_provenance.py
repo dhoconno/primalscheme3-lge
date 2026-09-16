@@ -155,6 +155,16 @@ def capabilities_document() -> dict[str, Any]:
         "toolVersion": version("primalscheme3"),
         "selectionAlgorithms": ["legacy", "coverage", "allele-coverage"],
         "alleleCoverage": {
+            "intendedProductPolicies": {
+                "default": "exact-supported",
+                "policies": {
+                    "exact-supported": {"id": "exact-supported/v1"},
+                    "concrete-designated-sites": {
+                        "id": "concrete-designated-sites/v1",
+                        "coverageCredit": 0,
+                    },
+                },
+            },
             "phaseScheduling": {
                 "default": "serial",
                 "policies": {
