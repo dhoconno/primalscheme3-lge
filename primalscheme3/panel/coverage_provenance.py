@@ -165,6 +165,21 @@ def capabilities_document() -> dict[str, Any]:
                     },
                 },
             },
+            "secondaryProductPolicies": {
+                "default": "ordered-disjoint-intended-sites",
+                "policies": {
+                    "ordered-disjoint-intended-sites": {
+                        "id": "ordered-disjoint-intended-sites/v1"
+                    },
+                    "reject-secondary-products/v1": {
+                        "id": "reject-secondary-products/v1"
+                    },
+                    "ordered-disjoint-concrete-designated-sites/v1": {
+                        "id": "ordered-disjoint-concrete-designated-sites/v1",
+                        "coverageCredit": 0,
+                    },
+                },
+            },
             "phaseScheduling": {
                 "default": "serial",
                 "policies": {

@@ -623,7 +623,7 @@ def panel_create(
     secondary_product_policy: Annotated[
         str | None,
         typer.Option(
-            help="ordered-disjoint-intended-sites or reject-secondary-products/v1",
+            help="ordered-disjoint-intended-sites, ordered-disjoint-concrete-designated-sites/v1, or reject-secondary-products/v1",
             rich_help_panel="Allele science",
         ),
     ] = None,

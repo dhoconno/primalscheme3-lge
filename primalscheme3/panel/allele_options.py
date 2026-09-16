@@ -126,6 +126,7 @@ class AlleleOptions:
             "secondary_product_policy": (
                 "ordered-disjoint-intended-sites",
                 "reject-secondary-products/v1",
+                "ordered-disjoint-concrete-designated-sites/v1",
             ),
         }
         for name, allowed in choices.items():

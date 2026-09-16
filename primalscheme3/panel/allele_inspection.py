@@ -564,6 +564,9 @@ def audit_allele_bundle(bundle, *, tier=None):
     # Missing historical fields mean the original exact-supported policy.
     optimizer_profile = dict(optimizer.get("profile", {}))
     optimizer_profile.setdefault("intended_product_policy", "exact-supported")
+    optimizer_profile.setdefault(
+        "secondary_product_policy", "ordered-disjoint-intended-sites"
+    )
     effective_intended = optimizer_profile["intended_product_policy"]
     option_sources = [config, optimizer.get("options", {})]
     if config.get("allele_options_json"):
@@ -582,6 +585,17 @@ def audit_allele_bundle(bundle, *, tier=None):
         for value in option_sources
     ):
         violations.append({"reason": "intended-product-policy-mismatch"})
+    effective_secondary = optimizer_profile["secondary_product_policy"]
+    if effective_secondary not in (
+        "ordered-disjoint-intended-sites",
+        "reject-secondary-products/v1",
+        "ordered-disjoint-concrete-designated-sites/v1",
+    ) or any(
+        value.get("secondary_product_policy", "ordered-disjoint-intended-sites")
+        != effective_secondary
+        for value in option_sources
+    ):
+        violations.append({"reason": "secondary-product-policy-mismatch"})
     expected_metric = "observed-allele-primer-trimmed/v1"
     if (
         optimizer.get("metric") != expected_metric

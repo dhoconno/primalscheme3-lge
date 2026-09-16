@@ -72,6 +72,7 @@ class AlleleConstraintProfile:
         if self.secondary_product_policy not in (
             "ordered-disjoint-intended-sites",
             "reject-secondary-products/v1",
+            "ordered-disjoint-concrete-designated-sites/v1",
         ):
             raise ValueError("unknown secondary product policy")
         if self.intended_product_policy not in (
@@ -96,6 +97,12 @@ class AlleleConstraintProfile:
             )
         if config.dimer_score != -26:
             raise ValueError("strict dimer baseline must be -26")
+        kwargs.setdefault(
+            "secondary_product_policy",
+            getattr(
+                config, "secondary_product_policy", "ordered-disjoint-intended-sites"
+            ),
+        )
         kwargs.setdefault(
             "intended_product_policy",
             getattr(config, "intended_product_policy", "exact-supported"),
@@ -223,6 +230,7 @@ class SelectedSiteSpecificityChecker(SpecificityChecker):
     def __init__(self, catalog, profile, *, cache=True):
         super().__init__(catalog, profile, cache=cache)
         self._projected_sites = {}
+        self._secondary_projections = {}
         self._observed_rows = {
             (allele.target_id, row): allele
             for allele in catalog.observations
@@ -392,7 +400,11 @@ class SelectedSiteSpecificityChecker(SpecificityChecker):
         sb, _ = self.intended(b)
         secondary = set()
         if (
-            self.profile.secondary_product_policy == "ordered-disjoint-intended-sites"
+            self.profile.secondary_product_policy
+            in (
+                "ordered-disjoint-intended-sites",
+                "ordered-disjoint-concrete-designated-sites/v1",
+            )
             and a.target_id == b.target_id
         ):
             for left, right in ((sa, sb), (sb, sa)):
@@ -493,6 +505,143 @@ class SelectedSiteSpecificityChecker(SpecificityChecker):
                 }
         return None
 
+    def _secondary_ends(self, candidate, allele):
+        """Linear selected-site projection index, never a four-way variant product."""
+        key = (candidate.id, allele.id)
+        if self.cache and key in self._secondary_projections:
+            return self._secondary_projections[key]
+        sides = []
+        k = self.profile.mismatch_kmersize
+        for strand, selected in (
+            ("+", candidate.forward_site_ids),
+            ("-", candidate.reverse_site_ids),
+        ):
+            values = []
+            for sid in sorted(selected):
+                site = self.catalog.site_by_id[sid]
+                if site.target_id != allele.target_id or site.strand != strand:
+                    continue
+                projection = self._concrete_projection(site, allele)
+                if (
+                    projection is None
+                    or len(site.sequence) < k
+                    or len(projection["terminal_mismatch_positions"]) > 1
+                ):
+                    continue
+                start, end = projection["expected_footprint"]
+                mismatches = len(projection["terminal_mismatch_positions"])
+                # On a complete concrete gap-skipped footprint this Hamming
+                # predicate is exactly hits()'s no-indel terminal predicate.
+                # Keep an occurrence-specific hit, including internal partners.
+                terminal_hit = {
+                    "oligo": site.sequence,
+                    "orientation": strand,
+                    "start": start,
+                    "end": end,
+                    "terminal_interval": [end - k, end]
+                    if strand == "+"
+                    else [start, start + k],
+                    "mismatches": mismatches,
+                    "classification": "single-mismatch"
+                    if mismatches
+                    else "exact-terminal",
+                    "owners": [candidate.id],
+                }
+                values.append(projection | {"terminal_hit": terminal_hit})
+            # Earliest ending R and latest starting F suffice for the internal
+            # existence test once the two external footprints are fixed.
+            values.sort(
+                key=lambda p: (
+                    (-p["expected_footprint"][0], p["expected_footprint"][1])
+                    if strand == "+"
+                    else (p["expected_footprint"][1], p["expected_footprint"][0]),
+                    p["site_id"],
+                )
+            )
+            by_hit = {}
+            for value in sorted(values, key=lambda p: p["site_id"]):
+                by_hit.setdefault((value["oligo"], *value["expected_footprint"]), value)
+            sides.append((values, by_hit))
+        result = tuple(sides)
+        if self.cache:
+            self._secondary_projections[key] = result
+        return result
+
+    def _concrete_secondary_certificate(self, candidates, witness):
+        if (
+            self.profile.secondary_product_policy
+            != "ordered-disjoint-concrete-designated-sites/v1"
+            or len(candidates) != 2
+        ):
+            return None
+        a, b = sorted(candidates, key=lambda c: c.id)
+        if (
+            a.id == b.id
+            or a.target_id != b.target_id
+            or a.target_id != witness["target_id"]
+        ):
+            return None
+        allele = self._observed_rows.get((witness["target_id"], witness["row_id"]))
+        if allele is None:
+            return None
+        plus, minus = witness["plus"], witness["minus"]
+        if (
+            plus["orientation"] != "+"
+            or minus["orientation"] != "-"
+            or any(
+                hit["classification"] in ("ambiguous", "uncertain-footprint")
+                for hit in (plus, minus)
+            )
+        ):
+            return None
+        if (
+            plus["end"] > minus["start"]
+            or not 0
+            < minus["end"] - plus["start"]
+            <= self.profile.mismatch_product_size
+        ):
+            return None
+        for left, right in ((a, b), (b, a)):
+            (lf, lf_index), (lr, _) = self._secondary_ends(left, allele)
+            (rf, _), (rr, rr_index) = self._secondary_ends(right, allele)
+            f = lf_index.get((plus["oligo"], plus["start"], plus["end"]))
+            r = rr_index.get((minus["oligo"], minus["start"], minus["end"]))
+            if f is None or r is None:
+                continue
+            inner_r = next(
+                (
+                    p
+                    for p in lr
+                    if f["expected_footprint"][1] <= p["expected_footprint"][0]
+                ),
+                None,
+            )
+            inner_f = next(
+                (
+                    p
+                    for p in rf
+                    if p["expected_footprint"][1] <= r["expected_footprint"][0]
+                ),
+                None,
+            )
+            if (
+                inner_r is None
+                or inner_f is None
+                or inner_r["expected_footprint"][1] > inner_f["expected_footprint"][0]
+            ):
+                continue
+            return {
+                "target_id": witness["target_id"],
+                "row_id": witness["row_id"],
+                "left_configuration_id": left.id,
+                "right_configuration_id": right.id,
+                "left_forward": deepcopy(f),
+                "left_reverse": deepcopy(inner_r),
+                "right_forward": deepcopy(inner_f),
+                "right_reverse": deepcopy(r),
+            }
+        return None
+
     def _evaluate(self, candidates, declared, secondary, support):
         result = super()._evaluate(candidates, declared, secondary, support)
         rejected, allowed, intended_allowed = [], [], []
@@ -530,6 +679,32 @@ class SelectedSiteSpecificityChecker(SpecificityChecker):
                     "coverage_credit": 0,
                 }
                 intended_allowed.append(
+                    permitted
+                    | {"id": semantic_id("selected-site-product-witness", permitted)}
+                )
+                continue
+            secondary_certificate = self._concrete_secondary_certificate(
+                candidates, witness
+            )
+            if secondary_certificate is not None:
+                permitted = witness | {
+                    "site_ids": tuple(
+                        secondary_certificate[name]["site_id"]
+                        for name in (
+                            "left_forward",
+                            "left_reverse",
+                            "right_forward",
+                            "right_reverse",
+                        )
+                    ),
+                    "classification": "nonexact-ordered-concrete-secondary-product",
+                    "reason": "ordered-disjoint-concrete-designated-sites/v1",
+                    "policy_id": "ordered-disjoint-concrete-designated-sites/v1",
+                    "certificate": secondary_certificate,
+                    "uncertain": False,
+                    "coverage_credit": 0,
+                }
+                allowed.append(
                     permitted
                     | {"id": semantic_id("selected-site-product-witness", permitted)}
                 )
@@ -1279,6 +1454,7 @@ def validate_allele_assignments(
         "support_diagnostics": support,
         "selected_sites": output,
         "allowed_secondary_products": allowed,
+        "allowed_secondary_product_count": len(allowed),
         "allowed_intended_products": intended_allowed,
         "allowed_intended_product_count": len(intended_allowed),
         "uncertainty_blocks": uncertainty,

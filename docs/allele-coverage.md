@@ -29,7 +29,7 @@ Repeat `--msa` for each target. Output must be a new directory. Supply the origi
 | `--specificity-terminal-k` | `17` | Changes the terminal seed used for supplied-row specificity screening. Comparisons must account for primer lengths and use a shared eligible catalog. |
 | `--mispriming-product-size` | `2000` | Upper product length screened on supplied rows; positive inclusive bound. This mode does not permit disabling screening with zero. |
 | `--intended-product-policy` | `exact-supported` | Opt-in `concrete-designated-sites` tolerates known potential products at the selected sites’ own concrete row footprints, without adding coverage. See below. |
-| `--secondary-product-policy` | `ordered-disjoint-intended-sites` | Allows the declared class of products between ordered disjoint intended sites, without coverage credit. `reject-secondary-products/v1` rejects secondary products. |
+| `--secondary-product-policy` | `ordered-disjoint-intended-sites` | Allows the declared class of products between ordered disjoint intended sites, without coverage credit. `reject-secondary-products/v1` rejects secondary products. Opt-in `ordered-disjoint-concrete-designated-sites/v1` also accepts complete concrete four-site certificates; see below. |
 | `--max-amplicons`, `--max-amplicons-msa` | Uncapped | Limits physical design size; caps may reduce achievable coverage. |
 
 The strict dimer cutoff remains −26. The score is the native numerical score, not free energy or a probability. Chemistry is defined by complete versioned profiles; ad hoc temperature/salt overrides are not silently accepted. Both profiles use the same modeled temperature window. That compatibility does not establish laboratory performance.
@@ -160,7 +160,8 @@ full-primer exact same-row support, with the original distinct-allele weighting.
 The reference amplicon-size limits and positive inclusive screening product bound
 are unchanged. Pair checks require a complete certificate from A or B; combining
 one end from each configuration or borrowing a third cannot rescue a product.
-The separate secondary-product rule continues to use exact-supported certificates.
+The default secondary-product rule continues to use exact-supported certificates.
+The separately selected concrete secondary policy is described below.
 
 Native profile/resolved options and stage constraints record
 `intended_product_policy`; capability descriptors identify
@@ -183,6 +184,42 @@ This opt-in interpretation is not an amplification-probability or laboratory
 specificity claim. Compare it explicitly against `exact-supported` using the same
 catalog, search controls and source/runtime identity; a coverage increase would
 not establish a global optimum or experimental performance.
+
+### Optional concrete secondary-product screening
+
+`--secondary-product-policy ordered-disjoint-concrete-designated-sites/v1` adds
+one pair-local exemption to the default `ordered-disjoint-intended-sites` rule.
+Two distinct configurations A and B must have four complete selected footprints
+on the same observed target row, in the order F_A, R_A, F_B, R_B. Adjacent full
+footprints may touch but cannot overlap. The actual screened external product
+must match F_A and R_B in sequence, orientation, and both full endpoints.
+
+All four footprints, including the two internal partners, must be observed
+A/C/G/T and support the actual configured terminal-k screening predicate (at most
+one substitution). Missing sequence, N/IUPAC, a shifted external hit, a wrong
+side, overlapping/reversed configurations, another target or a third
+configuration cannot complete this certificate. The product must still satisfy
+the positive inclusive screening-size limit. Existing unary, dimer, overlap and
+physical-exposure checks remain active. This secondary control does not change
+`--intended-product-policy`: its default exact unary checks can still reject a
+configuration before a pair is evaluated.
+
+The default and `reject-secondary-products/v1` remain unchanged. Missing old
+secondary-policy fields mean `ordered-disjoint-intended-sites`. Discovery cache
+identity is unchanged; selection and validation profile identities include the
+selected secondary policy. Exact same-row coverage receives **zero extra credit**.
+
+Each newly permitted contextual witness has classification
+`nonexact-ordered-concrete-secondary-product`, its versioned `policy_id`, four
+ordered `site_ids`, and a certificate with left/right configuration IDs and all
+four projected templates, full-primer mismatch partitions and occurrence-specific
+`terminal_hit` records. It remains in `allowed_secondary_products`, separate from
+intended witnesses. `allowed_secondary_product_count` counts contextual records,
+including existing exact certificates. Fresh saved-output audit reconstructs and
+compares the entire secondary evidence list against authoritative input rows.
+This optional screening interpretation makes no laboratory-performance or
+joint-panel feasibility guarantee; controlled comparisons use the same catalog,
+search budget, source and runtime.
 
 ### Live search observations
 

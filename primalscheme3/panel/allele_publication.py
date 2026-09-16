@@ -343,7 +343,18 @@ def audit_allele_stage(directory, *, history=None):
             != report["allowed_intended_product_count"]
         ):
             violations.append({"reason": "saved-intended-products-mismatch"})
+        saved_secondary = saved.get("allowed_secondary_products", [])
+        if (
+            json.dumps(saved_secondary, sort_keys=True)
+            != json.dumps(report["allowed_secondary_products"], sort_keys=True)
+            or saved.get("allowed_secondary_product_count", len(saved_secondary))
+            != report["allowed_secondary_product_count"]
+        ):
+            violations.append({"reason": "saved-secondary-products-mismatch"})
         saved_profile = dict(saved.get("profile", {}))
+        saved_profile.setdefault(
+            "secondary_product_policy", "ordered-disjoint-intended-sites"
+        )
         saved_profile.setdefault("intended_product_policy", "exact-supported")
         if saved_profile != report["profile"]:
             violations.append({"reason": "saved-validation-profile-mismatch"})
