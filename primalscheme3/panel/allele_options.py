@@ -7,8 +7,44 @@ import math
 from dataclasses import asdict, dataclass, fields
 from enum import Enum
 from pathlib import Path
+from types import MappingProxyType
 
 PRESET = "allele-balanced-v1"
+SEARCH_EFFORT_DEFAULTS = MappingProxyType(
+    {
+        "standard-v1": MappingProxyType(
+            {
+                "optimizer_time_limit": 120.0,
+                "optimizer_starts": 4,
+                "optimizer_repair_rounds": 2,
+                "work_construction_candidate_attempts": 2048,
+                "work_families_per_refresh": 16,
+            }
+        ),
+        "quality-v1": MappingProxyType(
+            {
+                "optimizer_time_limit": 3600.0,
+                "optimizer_starts": 8,
+                "optimizer_repair_rounds": 3,
+                "work_construction_candidate_attempts": 8192,
+                "work_families_per_refresh": 32,
+            }
+        ),
+    }
+)
+
+
+def search_efforts_descriptor():
+    """Fresh versioned compute-only descriptor, independent of science presets."""
+    return {
+        "default": "standard-v1",
+        "policies": {
+            name: {"id": name, "defaults": dict(values)}
+            for name, values in SEARCH_EFFORT_DEFAULTS.items()
+        },
+    }
+
+
 WORK_DEFAULTS = {
     "frontier_candidates": 64,
     "construction_candidate_attempts": 2048,
@@ -22,6 +58,7 @@ WORK_DEFAULTS = {
 NEW_OPTION_NAMES = frozenset(
     (
         "preset",
+        "search_effort",
         "candidate_profiles",
         "reuse_discovery",
         "variant_selection",
@@ -61,6 +98,7 @@ def _plain(value):
 @dataclass(frozen=True)
 class AlleleOptions:
     preset: str = PRESET
+    search_effort: str = "standard-v1"
     candidate_profiles: str = "union"
     reuse_discovery: str | None = None
     phase_scheduling: str = "serial"
@@ -115,6 +153,7 @@ class AlleleOptions:
                 raise ValueError("reuse_discovery must be a nonempty directory path")
         choices = {
             "preset": (PRESET,),
+            "search_effort": tuple(SEARCH_EFFORT_DEFAULTS),
             "candidate_profiles": ("union", "normal", "high-gc"),
             "variant_selection": ("full-cloud", "subsets"),
             "phase_scheduling": ("serial", "reserved"),
@@ -416,6 +455,16 @@ def resolve_allele_options(params):
         )
     names = {f.name for f in fields(AlleleOptions)} - {"requested_options_json"}
     values = {name: raw[name] for name in names if name in raw}
+    if not saved:
+        effort = values.get("search_effort", "standard-v1")
+        if not isinstance(effort, str) or effort not in SEARCH_EFFORT_DEFAULTS:
+            raise ValueError("search_effort must be standard-v1 or quality-v1")
+        # Click supplies historical numeric defaults in raw even when omitted.
+        # Only the actual request mask may override inherited effort values.
+        for name, value in SEARCH_EFFORT_DEFAULTS[effort].items():
+            if name not in original:
+                values[name] = value
+    # Saved configurations are resolved snapshots; never reapply effort defaults.
     nominal = values.get("amplicon_size", 400)
     if type(nominal) is not int:
         raise ValueError("amplicon_size must be an integer")

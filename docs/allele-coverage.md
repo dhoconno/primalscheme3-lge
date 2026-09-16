@@ -36,6 +36,43 @@ The strict dimer cutoff remains −26. The score is the native numerical score, 
 
 ## Search effort
 
+### Versioned search effort
+
+Optional `--search-effort quality-v1` supplies a larger compute budget. Omitting
+it selects `standard-v1`, preserving the existing defaults. It is independent
+of the scientific preset `allele-balanced-v1` and makes no coverage guarantee.
+
+| Control | standard-v1 | quality-v1 |
+|---|---:|---:|
+| `--optimizer-time-limit` | 120 seconds | 3600 seconds |
+| `--optimizer-starts` | 4 | 8 |
+| `--optimizer-repair-rounds` | 2 | 3 |
+| `--work-construction-candidate-attempts` | 2048 | 8192 |
+| `--work-families-per-refresh` | 16 | 32 |
+
+Explicit individual values always override effort defaults, regardless of flag
+order: `--search-effort quality-v1 --optimizer-starts 4` requests four starts.
+The time limit applies to the selector; loading, publication and fresh audit take
+additional time. Starts/rounds are maximum work counts, not promised completed
+work. Construction-attempt limits apply separately to each fill, including full
+and normal seeds; larger shared caps can spend more time in seeds.
+
+Effort does not change chemistry, coverage, specificity, intended/secondary
+product policies, dimer/exposure limits, variant selection, or scheduling.
+Scheduling remains `serial` unless explicitly changed. Salvage stays off by
+default and keeps its separate 60-second per-stage budget when enabled unless
+that control is explicitly overridden. Other advanced work defaults stay fixed.
+
+Native capabilities advertise `alleleCoverage.searchEfforts`. Requested options
+retain only actual overrides; resolved options/config/provenance retain
+`search_effort` and all final numeric controls. Historical missing effort fields
+mean `standard-v1`. Saved configurations preserve their already resolved values;
+loading them never recalculates budgets from an effort label. To apply new
+inheritance, resolve a fresh request rather than relabeling a saved snapshot.
+Programmatic callers use `Config(selection_algorithm="allele-coverage", ...,
+search_effort="quality-v1")` or `resolve_allele_options`; `AlleleOptions` itself is
+the immutable record of resolved values.
+
 `--optimizer-seed` (0), `--optimizer-starts` (4), `--optimizer-repair-rounds` (2), and `--optimizer-time-limit` (120 seconds) control search. `--subset-beam-width` (16) and `--subset-expansion-limit` (256) control how many variant subsets are considered. `--exchange-width` (2; maximum 2) controls replacement neighborhood size. Larger budgets may find improvements; they do not prove an optimum. Wall-clock budgets can interrupt different work on different machines.
 
 Advanced deterministic work limits are also exposed:

@@ -17,6 +17,7 @@ from typing import Any
 
 from primalscheme3.core.logger import close_owned_file_handlers
 
+from .allele_options import search_efforts_descriptor
 from .phase_scheduling import scheduling_policy
 
 CAPABILITIES_SCHEMA = "primalscheme3.capabilities/v1"
@@ -180,6 +181,7 @@ def capabilities_document() -> dict[str, Any]:
                     },
                 },
             },
+            "searchEfforts": search_efforts_descriptor(),
             "phaseScheduling": {
                 "default": "serial",
                 "policies": {

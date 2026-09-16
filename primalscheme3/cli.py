@@ -542,14 +542,17 @@ def panel_create(
         int, typer.Option(help="Deterministic coverage optimizer seed")
     ] = 0,
     optimizer_starts: Annotated[
-        int, typer.Option(help="Positive number of bounded optimizer starts")
-    ] = 4,
+        int | None,
+        typer.Option(help="Positive number of bounded optimizer starts; standard default 4"),
+    ] = None,
     optimizer_repair_rounds: Annotated[
-        int, typer.Option(help="Nonnegative repair rounds per optimizer start")
-    ] = 2,
+        int | None,
+        typer.Option(help="Nonnegative repair rounds per optimizer start; standard default 2"),
+    ] = None,
     optimizer_time_limit: Annotated[
-        float, typer.Option(help="Positive finite selector wall-time budget in seconds")
-    ] = 120.0,
+        float | None,
+        typer.Option(help="Positive finite selector wall-time budget in seconds; standard default 120"),
+    ] = None,
     mispriming_product_size: Annotated[
         int | None,
         typer.Option(
@@ -575,6 +578,13 @@ def panel_create(
         typer.Option(
             exists=True, file_okay=False,
             help="Reuse a verified panel-cache artifact with identical discovery biology; copy all origin history into this output",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
+    search_effort: Annotated[
+        str | None,
+        typer.Option(
+            help="Compute defaults: standard-v1 or quality-v1; explicit controls override. Science and scheduling unchanged.",
             rich_help_panel="Allele compute",
         ),
     ] = None,
@@ -795,6 +805,13 @@ def panel_create(
         params.setdefault("mode", PanelRunModes.EQUAL)
         params["_allele_requested_options"] = requested
     else:
+        for name, value in {
+            "optimizer_starts": 4,
+            "optimizer_repair_rounds": 2,
+            "optimizer_time_limit": 120.0,
+        }.items():
+            if params[name] is None:
+                params[name] = value
         supplied_new = sorted(
             name for name in NEW_OPTION_NAMES if params.get(name) is not None
         )
