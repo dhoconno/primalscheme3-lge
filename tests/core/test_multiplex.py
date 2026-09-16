@@ -238,9 +238,32 @@ class TestMultiplex(unittest.TestCase):
 
         # Remove the primerpair
         multiplex.update_coverage(primerpair, add=False)
-
-        # Check that the primerpair coverage has been removed
         self.assertEqual(multiplex._coverage[0].sum(), 0)
+
+    def test_dimer_cutoff_override_is_opt_in(self):
+        self.config.n_pools = 2
+        multiplex = Multiplex(
+            config=self.config, matchDB=self.matchdb, msa_dict={0: self.msa}
+        )
+        incumbent = PrimerPair(
+            FKmer([b"CGATTCAAATGACGGCAGCA"], 20),
+            RKmer([b"CCCCCCCCCCCCCCCCCCCC"], 80),
+            0,
+        )
+        candidate = PrimerPair(
+            FKmer([b"AGAACCGAGTGCTGACGTAA"], 120),
+            RKmer([b"TTTTTTTTTTTTTTTTTTTT"], 180),
+            0,
+        )
+        multiplex.add_primer_pair_to_pool(incumbent, 0, 0)
+        self.assertEqual(
+            multiplex.check_primerpair_can_be_added(candidate, 0),
+            PrimerPairCheck.INTERACTING,
+        )
+        self.assertEqual(
+            multiplex.check_primerpair_can_be_added(candidate, 0, dimer_score=-30),
+            PrimerPairCheck.OK,
+        )
 
     def test_coverage_circular(self):
         """

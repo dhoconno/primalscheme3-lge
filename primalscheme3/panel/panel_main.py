@@ -14,7 +14,12 @@ from click import UsageError
 
 # version import
 from primalscheme3.core.bedfiles import read_in_extra_primers
-from primalscheme3.core.config import AmpliconSizeMetric, Config, MappingType
+from primalscheme3.core.config import (
+    AmpliconSizeMetric,
+    Config,
+    MappingType,
+    TerminalGapPolicy,
+)
 from primalscheme3.core.create_report_data import generate_all_plotdata
 from primalscheme3.core.create_reports import generate_all_plots_html
 from primalscheme3.core.logger import setup_rich_logger
@@ -26,6 +31,11 @@ from primalscheme3.core.primer_visual import (
 )
 from primalscheme3.core.progress_tracker import ProgressManager
 from primalscheme3.panel.coverage_pipeline import run_coverage_pipeline
+from primalscheme3.panel.legacy_salvage import (
+    LegacySalvageOptions,
+    run_legacy_salvage,
+    validate_legacy_salvage,
+)
 
 # Module imports
 from primalscheme3.panel.panel_classes import (
@@ -85,10 +95,30 @@ def _panelcreate_impl(
     execution_start: dict | None = None,
     workflow_started_at: float | None = None,
     invocation_state: _CoverageInvocationState | None = None,
+    legacy_salvage_options: LegacySalvageOptions | None = None,
 ):
     coverage_started_at = (
         workflow_started_at if workflow_started_at is not None else monotonic()
     )
+    salvage_enabled = (
+        legacy_salvage_options is not None
+        and legacy_salvage_options.mode == "bounded"
+    )
+    if salvage_enabled:
+        if config.selection_algorithm != "legacy":
+            raise UsageError("legacy salvage requires --selection-algorithm legacy")
+        if mode != PanelRunModes.EQUAL:
+            raise UsageError("legacy salvage supports only whole-MSA equal mode")
+        if region_bedfile is not None:
+            raise UsageError("legacy salvage does not support region inputs")
+        if input_bedfile is not None or config.input_bedfile is not None:
+            raise UsageError("legacy salvage does not support imported primer pairs")
+        if config.circular:
+            raise UsageError("legacy salvage does not support circular references")
+        if config.terminal_gap_policy != TerminalGapPolicy.LEGACY:
+            raise UsageError("legacy salvage requires the legacy MSA generation policy")
+        if any(value is not None for value in (max_amplicons, max_amplicons_msa, max_amplicons_region_group)):
+            raise UsageError("legacy salvage requires uncapped strict panel generation")
     if config.selection_algorithm in {"coverage", "allele-coverage"}:
         if mode != PanelRunModes.EQUAL:
             raise UsageError("coverage selection supports only whole-MSA equal mode")
@@ -209,11 +239,22 @@ def _panelcreate_impl(
         local_name = (
             f"{msa_index:04d}-{msa_path.name}"
             if config.selection_algorithm in {"coverage", "allele-coverage"}
+            or (legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded")
             else msa_path.name
         )
         local_msa_path = OUTPUT_DIR / "work" / local_name
         read_path = msa_path
         if config.selection_algorithm in {"coverage", "allele-coverage"}:
+            shutil.copyfile(msa_path, local_msa_path)
+            read_path = local_msa_path
+            input_records.append(
+                {
+                    "sourcePath": str(msa_path.absolute()),
+                    "storedPath": f"work/{local_name}",
+                    "sourceIndex": msa_index,
+                }
+            )
+        elif legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded":
             shutil.copyfile(msa_path, local_msa_path)
             read_path = local_msa_path
             input_records.append(
@@ -235,7 +276,9 @@ def _panelcreate_impl(
         )
 
         # copy the msa into the output / work dir
-        if config.selection_algorithm == "legacy":
+        if config.selection_algorithm == "legacy" and not (
+            legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded"
+        ):
             msa_obj.write_msa_to_file(local_msa_path)
 
         # Create MSA checksum
@@ -519,6 +562,41 @@ def _panelcreate_impl(
                 logger.error("Unknown return from add_next_primerpair")
 
     # Log that the panel is finished
+    salvage_run = None
+    if legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded":
+        # Keep reviewable strict-stage artifacts before additions mutate pools.
+        (OUTPUT_DIR / "strict-primer.bed").write_text(panel.to_bed())
+        (OUTPUT_DIR / "strict-amplicon.bed").write_text(
+            panel.to_amplicons(trim_primers=False)
+        )
+        (OUTPUT_DIR / "strict-primertrim.amplicon.bed").write_text(
+            panel.to_amplicons(trim_primers=True)
+        )
+        salvage_run = run_legacy_salvage(
+            panel,
+            msa_dict,
+            legacy_salvage_options,
+            strict_cutoff=config.dimer_score,
+            logger=logger,
+        )
+        validation = validate_legacy_salvage(
+            panel,
+            msa_dict,
+            salvage_run,
+            strict_cutoff=config.dimer_score,
+        )
+        if not validation["valid"]:
+            raise RuntimeError(
+                "fresh legacy salvage validation failed: "
+                + "; ".join(validation["violations"])
+            )
+        (OUTPUT_DIR / "legacy-salvage.json").write_text(
+            json.dumps(salvage_run.to_dict(), sort_keys=True, separators=(",", ":")) + "\n"
+        )
+        (OUTPUT_DIR / "legacy-salvage-validation.json").write_text(
+            json.dumps(validation, sort_keys=True, separators=(",", ":")) + "\n"
+        )
+
     logger.info(
         f"Finished creating the panel. [green]{len(panel._last_pp_added)}[/green] amplicons total",
     )
@@ -604,6 +682,8 @@ def _panelcreate_impl(
     config_dict["input_bedfile"] = str(input_bedfile)
     config_dict["discovery_core_count"] = config.discovery_core_count
     config_dict["discovery_workers_by_msa"] = dict(config.discovery_workers_by_msa)
+    if legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded":
+        config_dict["legacy_salvage"] = legacy_salvage_options.to_dict()
     with open(OUTPUT_DIR / "config.json", "w") as outfile:
         outfile.write(json.dumps(config_dict, sort_keys=True))
 
@@ -651,6 +731,35 @@ def _panelcreate_impl(
 
     logger.info("Completed Successfully")
 
+    if legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded":
+        from primalscheme3.panel.coverage_provenance import finalize_provenance
+
+        scientific = {
+            "selectionAlgorithm": "legacy",
+            "algorithm": "bounded-legacy-dimer-salvage/v1",
+            "strictSelectedCount": len(salvage_run.strict_candidate_ids) if salvage_run else 0,
+            "retainedCandidateCount": (
+                len(salvage_run.candidate_manifest) if salvage_run else 0
+            ),
+            "salvage": salvage_run.to_dict() if salvage_run else {},
+        }
+        finalize_provenance(
+            output_dir=OUTPUT_DIR,
+            argv=executed_argv or list(sys.argv),
+            resolved_options=config_dict,
+            inputs=input_records,
+            started_at=coverage_started_at,
+            ended_at=monotonic(),
+            status="success",
+            exit_status=0,
+            stderr="",
+            scientific=scientific,
+            logger=logger,
+            execution_start=execution_start,
+        )
+        if invocation_state is not None:
+            invocation_state.provenance_finalized = True
+
 
 def panelcreate(
     msa: list[pathlib.Path],
@@ -666,13 +775,16 @@ def panelcreate(
     max_amplicons_region_group: int | None = None,
     offline_plots: bool = True,
     executed_argv: list[str] | None = None,
+    legacy_salvage_options: LegacySalvageOptions | None = None,
 ):
     """Public panel entry point with durable failure evidence for coverage runs."""
 
     started_at = monotonic()
     execution_start = None
     invocation_state = _CoverageInvocationState()
-    if config.selection_algorithm in {"coverage", "allele-coverage"}:
+    if config.selection_algorithm in {"coverage", "allele-coverage"} or (
+        legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded"
+    ):
         from primalscheme3.panel.coverage_provenance import capture_execution_identity
 
         execution_start = capture_execution_identity(msa)
@@ -694,11 +806,15 @@ def panelcreate(
             execution_start=execution_start,
             workflow_started_at=started_at,
             invocation_state=invocation_state,
+            legacy_salvage_options=legacy_salvage_options,
         )
     except BaseException as error:
         output = pathlib.Path(output_dir).absolute()
         if (
-            config.selection_algorithm in {"coverage", "allele-coverage"}
+            (
+                config.selection_algorithm in {"coverage", "allele-coverage"}
+                or (legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded")
+            )
             and invocation_state.output_owned
             and not invocation_state.provenance_finalized
             and output.is_dir()
@@ -709,6 +825,7 @@ def panelcreate(
                 {
                     "sourcePath": str(path.absolute()),
                     "storedPath": f"work/{index:04d}-{path.name}",
+                    "sourceIndex": index,
                 }
                 for index, path in enumerate(msa)
             ]
@@ -721,6 +838,8 @@ def panelcreate(
                     "max_amplicons_region_group": max_amplicons_region_group,
                 }
             )
+            if legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded":
+                resolved["legacy_salvage"] = legacy_salvage_options.to_dict()
             finalize_provenance(
                 output_dir=output,
                 argv=executed_argv or list(sys.argv),
@@ -731,7 +850,12 @@ def panelcreate(
                 status="failure",
                 exit_status=1,
                 stderr=str(error),
-                scientific={"selectionAlgorithm": config.selection_algorithm},
+                scientific={
+                    "selectionAlgorithm": config.selection_algorithm,
+                    "algorithm": "bounded-legacy-dimer-salvage/v1"
+                    if legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded"
+                    else config.selection_algorithm,
+                },
                 logger=invocation_state.logger,
                 execution_start=execution_start,
             )

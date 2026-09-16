@@ -153,6 +153,8 @@ class Multiplex:
         primerpair: PrimerPair,
         pool: int,
         otherseqs_bytes: list[bytes] | None = None,
+        *,
+        dimer_score: float | None = None,
     ) -> PrimerPairCheck:
         """
         Checks if the primerpair can be added to the multiplex
@@ -172,7 +174,7 @@ class Multiplex:
         if do_pool_interact(
             primerpair.all_seq_bytes(),
             otherseqs_bytes,
-            self.config.dimer_score,
+            self.config.dimer_score if dimer_score is None else dimer_score,
         ):
             return PrimerPairCheck.INTERACTING
 
