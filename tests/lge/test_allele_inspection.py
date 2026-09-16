@@ -172,6 +172,20 @@ def test_published_label_map_is_explicit_and_freshly_audited(bundle):
     }
 
 
+def test_label_audit_does_not_load_the_complete_discovery_catalog(bundle, monkeypatch):
+    module = api()
+    monkeypatch.setattr(
+        module,
+        "_catalog_path",
+        lambda *_: pytest.fail("label audit must use its fresh thin display context"),
+    )
+
+    result = module.audit_allele_bundle(bundle)
+
+    assert result["valid"], result
+    assert result["allele_label_map"]["valid"] is True
+
+
 @pytest.mark.parametrize("tamper", ["content", "missing"])
 def test_fresh_audit_rejects_tampered_or_detached_label_map(bundle, tamper):
     from primalscheme3.panel.allele_publication import artifact_descriptor

@@ -52,21 +52,23 @@ def _row_digest(cells) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def build_allele_label_map(catalog, bundle_root, input_records):
+def build_allele_label_map(targets, observations, bundle_root, input_records):
     """Bind saved FASTA headers to catalog rows without changing scientific IDs."""
 
     root = Path(bundle_root).resolve()
+    targets = tuple(targets)
+    observations = tuple(observations)
     indexes = [
         item.get("sourceIndex", index) for index, item in enumerate(input_records)
     ]
     if (
         any(type(index) is not int or index < 0 for index in indexes)
         or len(set(indexes)) != len(indexes)
-        or set(indexes) != {target.source_msa_index for target in catalog.targets}
+        or set(indexes) != {target.source_msa_index for target in targets}
     ):
         raise ValueError("input source occurrences differ from catalog targets")
-    target_by_source = {target.source_msa_index: target for target in catalog.targets}
-    if len(target_by_source) != len(catalog.targets):
+    target_by_source = {target.source_msa_index: target for target in targets}
+    if len(target_by_source) != len(targets):
         raise ValueError("catalog has ambiguous source occurrences")
 
     inputs = []
@@ -110,7 +112,7 @@ def build_allele_label_map(catalog, bundle_root, input_records):
             by_row_id[row_id] = row
 
         classes = []
-        for observation in catalog.observations:
+        for observation in observations:
             if observation.target_id != target.id:
                 continue
             row_ids = [

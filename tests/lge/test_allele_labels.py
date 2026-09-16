@@ -46,7 +46,9 @@ def test_label_map_preserves_multi_input_order_descriptions_and_duplicate_classe
     ]
     catalog = _catalog(tmp_path, records)
 
-    result = build_allele_label_map(catalog, tmp_path, records)
+    result = build_allele_label_map(
+        catalog.targets, catalog.observations, tmp_path, records
+    )
 
     assert result["schemaVersion"] == "primalscheme3.allele-label-map/v1"
     assert result["scientificIdentityRole"] == "display-only-excluded"
@@ -89,11 +91,15 @@ def test_reused_catalog_can_publish_current_headers_without_identity_change(tmp_
     raw.write_text(">old-name old display\n" + sequence + "\n")
     records = [{"storedPath": "work/input.fa", "sourceIndex": 0}]
     catalog = _catalog(tmp_path, records)
-    old = build_allele_label_map(catalog, tmp_path, records)
+    old = build_allele_label_map(
+        catalog.targets, catalog.observations, tmp_path, records
+    )
 
     raw.write_text(">new-name renamed display\n" + sequence + "\n")
     renamed_catalog = _catalog(tmp_path, records)
-    new = build_allele_label_map(catalog, tmp_path, records)
+    new = build_allele_label_map(
+        catalog.targets, catalog.observations, tmp_path, records
+    )
 
     assert renamed_catalog.semantic_digest == catalog.semantic_digest
     assert renamed_catalog.targets == catalog.targets
@@ -123,7 +129,7 @@ def test_label_map_rejects_raw_input_detached_from_catalog(tmp_path, change):
         records[0]["sourceIndex"] = 7
 
     with pytest.raises(ValueError, match="input|row|source"):
-        build_allele_label_map(catalog, tmp_path, records)
+        build_allele_label_map(catalog.targets, catalog.observations, tmp_path, records)
 
 
 def test_label_map_rejects_duplicate_native_record_ids_without_parser_change(tmp_path):

@@ -12,6 +12,7 @@ from collections import deque
 from importlib.metadata import version
 from pathlib import Path
 
+from .allele_coverage import canonical_observations
 from .allele_labels import SCHEMA as ALLELE_LABEL_SCHEMA
 from .allele_labels import build_allele_label_map
 from .allele_publication import _read, _targets, artifact_descriptor, audit_allele_stage
@@ -583,8 +584,14 @@ def audit_allele_bundle(bundle, *, tier=None):
             stored_labels = _read(_contained(bundle, label_path))
             if stored_labels.get("schemaVersion") != ALLELE_LABEL_SCHEMA:
                 raise ValueError("stored schema is invalid")
-            catalog = VariantCatalog.from_dict(_read(_catalog_path(bundle, optimizer)))
-            expected_labels = build_allele_label_map(catalog, bundle, inputs)
+            observations = tuple(
+                observation
+                for target in targets
+                for observation in canonical_observations(target)
+            )
+            expected_labels = build_allele_label_map(
+                targets, observations, bundle, inputs
+            )
             if stored_labels != expected_labels:
                 raise ValueError("saved labels differ from freshly parsed raw inputs")
             label_report.update(

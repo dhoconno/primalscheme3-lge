@@ -165,7 +165,9 @@ def run_allele_pipeline(
             json.dump(catalog.to_dict(), handle, sort_keys=True, separators=(",", ":"))
         _write(
             output_dir / "allele-label-map.json",
-            build_allele_label_map(catalog, output_dir, input_records),
+            build_allele_label_map(
+                catalog.targets, catalog.observations, output_dir, input_records
+            ),
         )
         history.checkpoint()
         for name in (
