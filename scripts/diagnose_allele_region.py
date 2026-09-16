@@ -93,6 +93,41 @@ def region_coverage(catalog, ledger, assignments, target, region):
     site_ids = sorted(
         {s for c in configs.values() for s in c.forward_site_ids + c.reverse_site_ids}
     )
+    selected_families = []
+    for family_id in sorted({c.family_id for c in configs.values()}):
+        family = catalog.family_by_id[family_id]
+        family_configs = [c for c in configs.values() if c.family_id == family_id]
+        retained = {
+            s for c in family_configs for s in c.forward_site_ids + c.reverse_site_ids
+        }
+        omitted = sorted(
+            s
+            for s in family.forward_site_ids + family.reverse_site_ids
+            if s not in retained
+            and catalog.site_by_id[s].accepting_profile_ids
+            and not catalog.site_by_id[s].mapping_failure
+            and catalog.site_by_id[s].reference_footprint is not None
+        )
+        selected_families.append(
+            {
+                "family_id": family_id,
+                "configuration_ids": sorted(c.id for c in family_configs),
+                "retained_site_ids": sorted(retained),
+                "omitted_eligible_site_ids": omitted,
+                "omitted_eligible_sites": [
+                    {
+                        "site": catalog.site_by_id[s].to_dict(),
+                        "class_support": [
+                            binding_support(catalog.site_by_id[s], a).to_dict()
+                            for a in catalog.observations
+                            if a.target_id == target.id
+                        ],
+                    }
+                    for s in omitted
+                ],
+                "scope": "Per-site binding support only, not counterfactual amplicon feasibility or coverage. Omitted means absent from all selected configurations of this family in this report; omission cause is not inferred.",
+            }
+        )
     classes = []
     for allele in catalog.observations:
         if allele.target_id != target.id:
@@ -145,6 +180,7 @@ def region_coverage(catalog, ledger, assignments, target, region):
         "weighting": "equal distinct observed classes; row aliases do not multiply weight",
         "mean_class_fraction": mean(fractions) if fractions else None,
         "classes": classes,
+        "selected_families": selected_families,
         "configurations": [c.to_dict() for c in configs.values()],
         "assignments": [
             a.to_dict() for a in assignments if a.configuration_id in configs
@@ -162,7 +198,15 @@ def _site_index(catalog, target):
     return index
 
 
-def match_alternative(catalog, target, item, *, index=None):
+def _family_index(catalog, target):
+    index = defaultdict(list)
+    for family in catalog.families:
+        if family.target_id == target.id:
+            index[(family.target_id, family.anchor_pair)].append(family)
+    return index
+
+
+def match_alternative(catalog, target, item, *, index=None, family_index=None):
     """All original variants must match; never silently delete failed variants."""
     index = _site_index(catalog, target) if index is None else index
     sides, issues = [], []
@@ -214,12 +258,16 @@ def match_alternative(catalog, target, item, *, index=None):
         return {"status": "unavailable", "issues": issues}
     fs, rs = sides
     anchors = ({s.alignment_anchor for s in fs}, {s.alignment_anchor for s in rs})
-    families = [
-        f
-        for f in catalog.families
-        if f.target_id == target.id
-        and anchors == ({f.anchor_pair[0]}, {f.anchor_pair[1]})
-    ]
+    family_index = (
+        _family_index(catalog, target) if family_index is None else family_index
+    )
+    families = (
+        family_index.get(
+            (target.id, (next(iter(anchors[0])), next(iter(anchors[1])))), ()
+        )
+        if all(len(side) == 1 for side in anchors)
+        else ()
+    )
     if len(families) != 1:
         return {
             "status": "unavailable",
@@ -303,6 +351,7 @@ def _source_changed(before, after):
 
 def _legacy_records(paths, catalog, target, region):
     index = _site_index(catalog, target)
+    family_index = _family_index(catalog, target)
     records = []
     for source_index, path in enumerate(paths):
         data = _read(path)
@@ -312,7 +361,9 @@ def _legacy_records(paths, catalog, target, region):
         for ordinal, item in enumerate(candidates):
             if not isinstance(item, dict):
                 raise ValueError("legacy candidate must be an object")
-            match = match_alternative(catalog, target, item, index=index)
+            match = match_alternative(
+                catalog, target, item, index=index, family_index=family_index
+            )
             c = match.pop("configuration", None)
             record = {
                 "source_path": str(path),
