@@ -177,6 +177,8 @@ def test_pipeline_reuse_skips_discovery_and_preserves_origin_history(
         executed_argv=["primalscheme3", "panel-create"],
     )
     export_panel_discovery_cache(original, cache, argv=["primalscheme3", "panel-cache"])
+    original_labels = json.loads((original / "allele-label-map.json").read_text())
+    msa.write_text(">renamed-current-input\n" + "A" * 30 + "\n")
 
     def never(*args, **kwargs):
         raise AssertionError("discovery must not run")
@@ -197,6 +199,16 @@ def test_pipeline_reuse_skips_discovery_and_preserves_origin_history(
     assert (
         optimizer["history"]["originDiscovery"]["path"]
         == "origin-discovery/manifest.json"
+    )
+    reused_labels = json.loads((reused / "allele-label-map.json").read_text())
+    assert original_labels["targets"][0]["rows"][0]["fasta_description"] == "short"
+    assert (
+        reused_labels["targets"][0]["rows"][0]["fasta_description"]
+        == "renamed-current-input"
+    )
+    assert (
+        original_labels["targets"][0]["rows"][0]["row_id"]
+        == reused_labels["targets"][0]["rows"][0]["row_id"]
     )
     assert audit_allele_bundle(reused)["valid"]
     result = query_allele_history(reused, stage="discovery", limit=2)

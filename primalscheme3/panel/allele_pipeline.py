@@ -10,6 +10,8 @@ from pathlib import Path
 from time import monotonic
 from types import SimpleNamespace
 
+from .allele_labels import SCHEMA as ALLELE_LABEL_SCHEMA
+from .allele_labels import build_allele_label_map
 from .allele_options import AlleleOptions
 from .allele_progress import SCHEMA, ProgressWriter
 from .allele_publication import publish_allele_stage
@@ -161,6 +163,10 @@ def run_allele_pipeline(
         # selector or publication fails. Keep its complete catalog independently.
         with gzip.open(output_dir / "discovery-catalog.json.gz", "wt") as handle:
             json.dump(catalog.to_dict(), handle, sort_keys=True, separators=(",", ":"))
+        _write(
+            output_dir / "allele-label-map.json",
+            build_allele_label_map(catalog, output_dir, input_records),
+        )
         history.checkpoint()
         for name in (
             "discovery_workers_by_msa",
@@ -364,6 +370,10 @@ def run_allele_pipeline(
             },
             "publication": {
                 "targetToReference": references,
+                "alleleLabelMap": {
+                    "path": "allele-label-map.json",
+                    "schemaVersion": ALLELE_LABEL_SCHEMA,
+                },
                 "configurationToAmplicon": publications[primary_stage]["manifest"][
                     "configuration_names"
                 ],

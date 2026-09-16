@@ -149,6 +149,93 @@ def test_fresh_audit_survives_relocation_and_missing_original(bundle, tmp_path):
         api().audit_allele_bundle(moved, tier="salvage-99")
 
 
+def test_published_label_map_is_explicit_and_freshly_audited(bundle):
+    optimizer = json.loads((bundle / "panel-optimizer.json").read_text())
+    reference = optimizer["publication"]["alleleLabelMap"]
+    assert reference == {
+        "path": "allele-label-map.json",
+        "schemaVersion": "primalscheme3.allele-label-map/v1",
+    }
+    label_map = json.loads((bundle / reference["path"]).read_text())
+    target = label_map["targets"][0]
+    assert target["rows"][0]["fasta_description"] == "short"
+    assert target["classes"][0]["fasta_descriptions"] == ["short"]
+    result = api().audit_allele_bundle(bundle)
+    assert result["valid"], result
+    assert result["allele_label_map"] == {
+        "advertised": True,
+        "valid": True,
+        "path": "allele-label-map.json",
+        "targets": 1,
+        "rows": 1,
+        "classes": 1,
+    }
+
+
+@pytest.mark.parametrize("tamper", ["content", "missing"])
+def test_fresh_audit_rejects_tampered_or_detached_label_map(bundle, tamper):
+    from primalscheme3.panel.allele_publication import artifact_descriptor
+
+    path = bundle / "allele-label-map.json"
+    provenance_path = bundle / "panel-provenance.json"
+    provenance = json.loads(provenance_path.read_text())
+    if tamper == "content":
+        value = json.loads(path.read_text())
+        value["targets"][0]["rows"][0]["fasta_description"] = "forged"
+        path.write_text(json.dumps(value))
+        descriptor = artifact_descriptor(path, bundle)
+        provenance["outputs"] = [
+            descriptor if item["path"] == descriptor["path"] else item
+            for item in provenance["outputs"]
+        ]
+    else:
+        path.unlink()
+        provenance["outputs"] = [
+            item
+            for item in provenance["outputs"]
+            if item["path"] != "allele-label-map.json"
+        ]
+    provenance_path.write_text(json.dumps(provenance))
+
+    result = api().audit_allele_bundle(bundle)
+
+    assert not result["valid"]
+    assert result["allele_label_map"]["advertised"] is True
+    assert result["allele_label_map"]["valid"] is False
+    assert any(
+        violation["reason"].startswith("allele-label-map")
+        for violation in result["violations"]
+    )
+
+
+def test_historical_bundle_without_label_map_remains_valid(bundle):
+    from primalscheme3.panel.allele_publication import artifact_descriptor
+
+    optimizer_path = bundle / "panel-optimizer.json"
+    optimizer = json.loads(optimizer_path.read_text())
+    optimizer["publication"].pop("alleleLabelMap")
+    optimizer_path.write_text(json.dumps(optimizer))
+    (bundle / "allele-label-map.json").unlink()
+    provenance_path = bundle / "panel-provenance.json"
+    provenance = json.loads(provenance_path.read_text())
+    optimizer_descriptor = artifact_descriptor(optimizer_path, bundle)
+    provenance["outputs"] = [
+        optimizer_descriptor if item["path"] == "panel-optimizer.json" else item
+        for item in provenance["outputs"]
+        if item["path"] != "allele-label-map.json"
+    ]
+    provenance_path.write_text(json.dumps(provenance))
+
+    result = api().audit_allele_bundle(bundle)
+
+    assert result["valid"], result
+    assert result["allele_label_map"] == {
+        "advertised": False,
+        "valid": None,
+        "path": None,
+    }
+
+
 def test_raw_input_change_detected_even_if_output_descriptors_updated(bundle):
     from primalscheme3.panel.allele_publication import artifact_descriptor
 

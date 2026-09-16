@@ -12,6 +12,8 @@ from collections import deque
 from importlib.metadata import version
 from pathlib import Path
 
+from .allele_labels import SCHEMA as ALLELE_LABEL_SCHEMA
+from .allele_labels import build_allele_label_map
 from .allele_publication import _read, _targets, artifact_descriptor, audit_allele_stage
 from .coverage_history import (
     CoverageHistory,
@@ -561,6 +563,43 @@ def audit_allele_bundle(bundle, *, tier=None):
         targets = ()
         raw_reparsed = False
         violations.append({"reason": "raw-input-reparse", "error": str(exc)})
+    label_reference = optimizer.get("publication", {}).get("alleleLabelMap")
+    label_report = {"advertised": False, "valid": None, "path": None}
+    if label_reference is not None:
+        label_report = {"advertised": True, "valid": False, "path": None}
+        try:
+            if not isinstance(label_reference, dict):
+                raise ValueError("reference must be an object")
+            label_path = label_reference.get("path")
+            if (
+                label_reference.get("schemaVersion") != ALLELE_LABEL_SCHEMA
+                or not isinstance(label_path, str)
+                or not label_path
+            ):
+                raise ValueError("reference schema/path is invalid")
+            label_report["path"] = label_path
+            if label_path not in paths:
+                raise ValueError("artifact is absent from panel output descriptors")
+            stored_labels = _read(_contained(bundle, label_path))
+            if stored_labels.get("schemaVersion") != ALLELE_LABEL_SCHEMA:
+                raise ValueError("stored schema is invalid")
+            catalog = VariantCatalog.from_dict(_read(_catalog_path(bundle, optimizer)))
+            expected_labels = build_allele_label_map(catalog, bundle, inputs)
+            if stored_labels != expected_labels:
+                raise ValueError("saved labels differ from freshly parsed raw inputs")
+            label_report.update(
+                valid=True,
+                targets=len(stored_labels["targets"]),
+                rows=sum(len(target["rows"]) for target in stored_labels["targets"]),
+                classes=sum(
+                    len(target["classes"]) for target in stored_labels["targets"]
+                ),
+            )
+        except Exception as exc:
+            label_report["error"] = str(exc)
+            violations.append(
+                {"reason": "allele-label-map-validation", "error": str(exc)}
+            )
     # Missing historical fields mean the original exact-supported policy.
     optimizer_profile = dict(optimizer.get("profile", {}))
     optimizer_profile.setdefault("intended_product_policy", "exact-supported")
@@ -684,6 +723,7 @@ def audit_allele_bundle(bundle, *, tier=None):
         "stages": reports,
         "raw_inputs_reparsed": raw_reparsed,
         "primary_tier": primary,
+        "allele_label_map": label_report,
         "scope": "stored-original-inputs-and-fresh-selected-stage-kernels",
     }
 
