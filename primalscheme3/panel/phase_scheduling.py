@@ -50,9 +50,14 @@ class PhaseScheduler:
         search.phase_deadline = cutoff
         before = dict(search.work)
         proposal_before = dict(self.proposals.work)
+        accepted_before = search.repairs_accepted
         item = {
             "phase": name,
             "outcome": "running",
+            # Same numeric objective terms as objective_history; omit the
+            # final canonical assignment-ID tie breaker.
+            "objective_before": list(search.best_key[:-1]),
+            "family_cursors_before": dict(self.proposals.cursors),
             "started_seconds": max(0.0, begin - self.epoch),
             "local_budget_seconds": None
             if math.isinf(cutoff)
@@ -63,7 +68,10 @@ class PhaseScheduler:
             stage_id=self.stage_id,
             kind="phase-started",
             entity_ids=(),
-            changes={"phase": name},
+            changes={
+                key: item[key]
+                for key in ("phase", "objective_before", "family_cursors_before")
+            },
         )
         try:
             search.tick()
@@ -95,6 +103,8 @@ class PhaseScheduler:
                 for key, value in self.proposals.work.items()
             }
             item["family_cursors"] = dict(self.proposals.cursors)
+            item["objective_after"] = list(search.best_key[:-1])
+            item["repairs_accepted_delta"] = search.repairs_accepted - accepted_before
             self.history.emit(
                 stage_id=self.stage_id,
                 kind="phase-finished",
@@ -107,6 +117,10 @@ class PhaseScheduler:
                         "work_delta",
                         "proposal_work_delta",
                         "family_cursors",
+                        "family_cursors_before",
+                        "objective_before",
+                        "objective_after",
+                        "repairs_accepted_delta",
                     )
                 },
             )

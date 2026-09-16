@@ -125,7 +125,8 @@ not guarantee an improvement or completed repair. Serial remains the default
 until same-catalog measurements support changing it.
 
 Each stage records the resolved `scheduling_policy`, `phase_progress` (outcomes,
-work/proposal deltas, cursors, budgets, elapsed time and local overshoot), omitted
+work/proposal deltas, before/after cursors and numeric objectives, accepted-repair
+deltas, budgets, elapsed time and local overshoot), omitted
 phases, the active phase at global stop, and global deadline overshoot. Outcomes
 distinguish `work-cap`, `exhausted`, `no-eligible-work`, `phase-time-limit`, global
 `time-limit`, and `cancelled`. Exhaustion refers to the named bounded phase or

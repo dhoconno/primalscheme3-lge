@@ -7,6 +7,7 @@ from test_allele_search import instance, run
 
 from primalscheme3.panel import allele_search as allele
 from primalscheme3.panel.coverage_search import _Search
+from primalscheme3.panel.coverage_types import canonical_json
 
 
 class Clock:
@@ -69,6 +70,22 @@ def test_reserved_seed_and_repair_preparation_cutoffs_still_reach_exchange(monke
         assert progress[name]["outcome"] == "phase-time-limit"
     assert progress["construction:0"]["work_delta"]["candidate_attempts"] > 0
     assert progress["repair:0:0/exchange"]["work_delta"]["repair_trials"] > 0
+    exchange = progress["repair:0:0/exchange"]
+    assert exchange["objective_after"] < exchange["objective_before"]
+    assert exchange["repairs_accepted_delta"] > 0
+    assert progress["construction:0"]["family_cursors_before"].get("expanded", 0) == 0
+    for name in (
+        "seed:full",
+        "seed:normal",
+        "repair:0:0/preparation",
+        "repair:0:0/cleanup",
+    ):
+        assert progress[name]["objective_before"] == progress[name]["objective_after"]
+        assert progress[name]["repairs_accepted_delta"] == 0
+    assert (
+        sum(p["repairs_accepted_delta"] for p in progress.values())
+        == result.metadata["repairs_accepted"]
+    )
     assert not result.metadata["fixed_work_completed"]
     assert clock.value <= 100
 
@@ -308,3 +325,31 @@ def test_cli_exposes_policy_and_rejects_it_for_legacy():
     assert "--phase-scheduling" in help_result.stdout
     with pytest.raises(ValueError):
         Config(phase_scheduling="reserved")
+
+
+def test_phase_objectives_and_cursors_form_continuous_history():
+    cat, configs, profile = instance({"A": (3, 21), "B": (1, 11), "C": (13, 23)})
+    result = run(
+        cat,
+        configs,
+        profile,
+        clock=Clock(),
+        options=allele.AlleleSearchOptions(
+            starts=2, repair_rounds=1, phase_scheduling="reserved"
+        ),
+    )
+    progress = result.metadata["phase_progress"]
+    for earlier, later in zip(progress, progress[1:], strict=False):
+        assert earlier["objective_after"] == later["objective_before"]
+        assert earlier["family_cursors"] == later["family_cursors_before"]
+    assert progress[-1]["objective_after"] == list(result.objective[:-1])
+    finished = [e for e in result.history.events if e.kind == "phase-finished"]
+    for item, event in zip(progress, finished, strict=True):
+        for key in (
+            "objective_before",
+            "objective_after",
+            "repairs_accepted_delta",
+            "family_cursors_before",
+        ):
+            # Immutable history freezes JSON arrays as tuples.
+            assert canonical_json(event.changes[key]) == canonical_json(item[key])
