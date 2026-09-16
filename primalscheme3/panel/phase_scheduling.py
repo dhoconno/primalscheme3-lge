@@ -73,6 +73,8 @@ class PhaseScheduler:
                 for key in ("phase", "objective_before", "family_cursors_before")
             },
         )
+        if search.progress_observer is not None:
+            search.progress_observer.phase_event(name, "phase-started", begin)
         try:
             search.tick()
             item["outcome"] = action() or "completed"
@@ -125,4 +127,9 @@ class PhaseScheduler:
                 },
             )
             search.phase_deadline = prior
+            if search.progress_observer is not None:
+                search.progress_observer.phase_event(
+                    name, "phase-finished", begin + item["elapsed_seconds"],
+                    outcome=item["outcome"],
+                )
         return item["outcome"]

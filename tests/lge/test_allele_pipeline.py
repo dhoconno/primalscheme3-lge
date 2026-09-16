@@ -40,6 +40,12 @@ def test_empty_native_allele_workflow_has_portable_outputs_and_provenance(tmp_pa
     panelcreate([msa], out, config, None, mode=PanelRunModes.EQUAL, executed_argv=argv)
     provenance = json.loads((out / "panel-provenance.json").read_text())
     assert provenance["exitStatus"] == 0
+    progress = out / "search-progress.jsonl"
+    assert progress.is_file()
+    assert "search-progress.jsonl" in json.dumps(provenance["outputs"])
+    records = [json.loads(line) for line in progress.read_text().splitlines()]
+    assert records[0]["kind"] == "search-started"
+    assert records[-1]["kind"] == "search-finished"
     assert (out / "history/history.sqlite").is_file()
     optimizer = json.loads((out / "panel-optimizer.json").read_text())
     assert optimizer["primaryTier"] == "strict"
@@ -110,6 +116,7 @@ def test_search_failure_retains_complete_discovery_catalog(tmp_path, monkeypatch
     )
 
     def fail(*args, **kwargs):
+        kwargs["observer"]({"kind": "partial-search"})
         raise RuntimeError("injected search failure")
 
     monkeypatch.setattr(allele_pipeline, "search_allele_assignments", fail)
@@ -127,6 +134,8 @@ def test_search_failure_retains_complete_discovery_catalog(tmp_path, monkeypatch
     assert len(catalog.targets) == 1
     assert (out / "history/history.sqlite").is_file()
     receipt = json.loads((out / "panel-provenance.json").read_text())
+    assert "search-progress.jsonl" in json.dumps(receipt["outputs"])
+    assert "partial-search" in (out / "search-progress.jsonl").read_text()
     assert receipt["exitStatus"] != 0
     assert any(p["path"] == "discovery-catalog.json.gz" for p in receipt["outputs"])
 

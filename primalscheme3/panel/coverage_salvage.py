@@ -146,6 +146,7 @@ def run_salvage(
     on_tier=None,
     cancelled=None,
     score_cache=None,
+    observer=None,
 ):
     options = options or SalvageOptions()
     if strict.validation.get("stage_policy") != asdict(
@@ -239,6 +240,7 @@ def run_salvage(
                 history=history,
                 cancelled=cancelled,
                 score_cache=score_cache,
+                observer=observer,
             )
             if not result.validation.get("valid"):
                 raise ValueError("tier failed independent validation")

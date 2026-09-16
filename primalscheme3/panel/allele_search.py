@@ -884,6 +884,7 @@ def search_allele_configurations(
     history=None,
     clock=monotonic,
     cancelled=None,
+    observer=None,
     _complete_history=True,
 ) -> AlleleSearchResult:
     """Abstract combinatorial entry. A valid result here is not a scientific certificate."""
@@ -943,6 +944,12 @@ def search_allele_configurations(
     retained_baseline = search.best
     empty_summary = allele_summary(catalog, (), ledger, goal=options.coverage_target)
     begin = clock()
+    if observer is not None:
+        from .allele_progress import SearchProgress
+
+        search.progress_observer = SearchProgress(
+            search, proposals, policy.stage_id, observer, begin
+        )
     search.deadline = begin + options.time_limit
     stop = "completed"
     starts = repairs = 0
@@ -1033,7 +1040,14 @@ def search_allele_configurations(
         stop = "time-limit"
     except _Cancelled:
         stop = "cancelled"
+    except BaseException as error:
+        if search.progress_observer is not None:
+            search.progress_observer.emit("search-failed", error=str(error))
+        raise
     elapsed = max(0, clock() - begin)
+    if search.progress_observer is not None:
+        search.progress_observer.now = begin + elapsed
+        search.progress_observer.emit("search-finished", outcome=stop)
     search.deadline = math.inf
     search.phase_deadline = math.inf
     validation = search.check(search.best)
@@ -1142,6 +1156,7 @@ def search_allele_assignments(
     clock=monotonic,
     cancelled=None,
     score_cache=None,
+    observer=None,
 ) -> AlleleSearchResult:
     """Production search with independently reconstructed baseline and final validation."""
     options = options or AlleleSearchOptions()
@@ -1169,6 +1184,7 @@ def search_allele_assignments(
         history=history,
         clock=clock,
         cancelled=cancelled,
+        observer=observer,
         _complete_history=False,
     )
     validation = validate_allele_assignments(

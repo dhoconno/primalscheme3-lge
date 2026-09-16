@@ -11,6 +11,7 @@ from time import monotonic
 from types import SimpleNamespace
 
 from .allele_options import AlleleOptions
+from .allele_progress import SCHEMA, ProgressWriter
 from .allele_publication import publish_allele_stage
 from .allele_search import search_allele_assignments
 from .allele_validation import AlleleConstraintProfile, StagePolicy
@@ -105,6 +106,7 @@ def run_allele_pipeline(
 ):
     output_dir = Path(output_dir)
     history = None
+    progress = None
     timings = {}
     origin_discovery = None
     scientific = {"selectionAlgorithm": "allele-coverage"}
@@ -181,8 +183,19 @@ def run_allele_pipeline(
         search_options = options.search_options()
         scores = {}
         start = monotonic()
+        progress = ProgressWriter(output_dir / "search-progress.jsonl")
+        scientific["searchProgress"] = {
+            "path": "search-progress.jsonl",
+            "schemaVersion": SCHEMA,
+            "validationScope": "provisional-oracle-checked",
+        }
         strict = search_allele_assignments(
-            catalog, profile, search_options, history=history, score_cache=scores
+            catalog,
+            profile,
+            search_options,
+            history=history,
+            score_cache=scores,
+            observer=progress,
         )
         timings["strict_search_and_validation_seconds"] = monotonic() - start
         publications = {}
@@ -218,6 +231,7 @@ def run_allele_pipeline(
             history=history,
             on_tier=publish,
             score_cache=scores,
+            observer=progress,
         )
         timings["salvage_total_seconds"] = monotonic() - start
         # Failed publication still retains every explored configuration for history queries.
@@ -403,6 +417,8 @@ def run_allele_pipeline(
             "Completed allele-aware panel with independently validated primary tier %s",
             primary_stage,
         )
+        if progress is not None:
+            progress.close()
         finalize_provenance(
             output_dir=output_dir,
             argv=argv,
@@ -421,6 +437,8 @@ def run_allele_pipeline(
             invocation_state.provenance_finalized = True
         return optimizer
     except BaseException as error:
+        if progress is not None:
+            progress.close()
         if history is not None:
             history.close()
         logger.exception("Allele-aware panel failed")

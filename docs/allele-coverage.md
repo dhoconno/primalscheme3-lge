@@ -183,3 +183,29 @@ This opt-in interpretation is not an amplification-probability or laboratory
 specificity claim. Compare it explicitly against `exact-supported` using the same
 catalog, search controls and source/runtime identity; a coverage increase would
 not establish a global optimum or experimental performance.
+
+### Live search observations
+
+Allele panel creation writes `search-progress.jsonl` (schema
+`primalscheme3.allele-search-progress/v1`). Each flushed record has a UTC timestamp,
+stage, elapsed search time, active phase, incumbent ID, exact numeric objective
+terms, per-target coverage, mean coverage, work counters and family cursors.
+Search starts and incumbent improvements include configuration IDs and zero-based
+pool IDs; the incumbent ID also identifies the canonical assignment tie breaker.
+These IDs resolve against the retained configuration ledger. Subsequent records
+reference that incumbent. Targets with no assessable classes have null coverage.
+
+Phase transitions and improvements are recorded immediately. Cooperative ticks
+emit a heartbeat after at least 30 seconds without another record. Elapsed and
+latest-improvement times use the latest existing search-clock sample; expensive
+indivisible operations can delay sampling and heartbeats. UTC timestamps record
+emission time. Family counts describe explored proposal streams, not exhaustive
+subset enumeration. In full-cloud mode, the unique-family count includes the
+families visited by that mode's full-cloud seed stream.
+
+All observations are **provisional oracle-checked**, not independently audited
+scientific panels. Search completion can precede fresh validation or a fallback;
+the published stage validation remains authoritative. The append-only log is
+retained on failure and included in the final provenance output hashes. It is not
+a checkpoint or resume format. Programmatic search callers can omit `observer`
+to disable observations; the native pipeline enables them by default.

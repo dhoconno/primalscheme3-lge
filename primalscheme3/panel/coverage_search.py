@@ -290,6 +290,7 @@ class _Search:
         self.best_key = self.state().key()
         self.history = [{"phase": "empty", "objective": list(self.best_key[:-1])}]
         self.repairs_accepted = 0
+        self.progress_observer = None
 
     def state(self, assignments=()):
         if self.state_factory is not None:
@@ -308,6 +309,8 @@ class _Search:
         if self.deadline < math.inf and self.cancelled is not None and self.cancelled():
             raise _Cancelled
         now = self.clock()
+        if self.progress_observer is not None:
+            self.progress_observer.tick(now)
         if now >= self.deadline:
             raise _TimeLimit
         if now >= self.phase_deadline:
@@ -337,6 +340,8 @@ class _Search:
             self.history.append({"phase": phase, "objective": list(key[:-1])})
             if self.record_hook is not None:
                 self.record_hook(previous, self.best, phase)
+            if self.progress_observer is not None:
+                self.progress_observer.improved(state)
             return True
         return False
 
