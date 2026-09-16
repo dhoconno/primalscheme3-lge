@@ -7,7 +7,6 @@ import hashlib
 import json
 import os
 import shlex
-import shutil
 import sqlite3
 import tempfile
 import zlib
@@ -32,6 +31,7 @@ from .coverage_discovery import (
 from .coverage_history import IntrinsicEvidence, StageSnapshot
 from .coverage_provenance import runtime_identity, source_identity
 from .coverage_types import CandidateFamily, VariantCatalog, canonical_json
+from .immutable_copy import copy_immutable_file
 
 SCHEMA = "primalscheme3.discovery-cache/v1"
 _DISCOVERY_FILES = tuple(
@@ -251,11 +251,11 @@ def _export_panel_discovery_cache(
     try:
         (pending / "history").mkdir()
         (pending / "inputs").mkdir()
-        shutil.copyfile(panel_dir / catalog_path, pending / "catalog.json.gz")
-        shutil.copyfile(
+        copy_immutable_file(panel_dir / catalog_path, pending / "catalog.json.gz")
+        copy_immutable_file(
             panel_dir / "history/history.sqlite", pending / "history/history.sqlite"
         )
-        shutil.copyfile(
+        copy_immutable_file(
             panel_dir / "configuration-ledger.json.gz",
             pending / "configuration-ledger.json.gz",
         )
@@ -263,7 +263,7 @@ def _export_panel_discovery_cache(
         inputs = []
         for index, item in enumerate(provenance["inputs"]):
             relative = f"inputs/{index:04d}-" + Path(item["storedPath"]).name
-            shutil.copyfile(_local(panel_dir, item["storedPath"]), pending / relative)
+            copy_immutable_file(_local(panel_dir, item["storedPath"]), pending / relative)
             inputs.append(
                 {
                     "storedPath": relative,
@@ -695,7 +695,7 @@ def materialize_cache_reuse(reuse, output_dir, *, history):
     ):
         target = _local(destination, name)
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(_local(reuse.source_directory, name), target)
+        copy_immutable_file(_local(reuse.source_directory, name), target)
     for name, descriptor in reuse.manifest["artifacts"].items():
         _verify(destination, name, descriptor)
     receipt = _read(_local(destination, reuse.manifest["exportProvenancePath"]))

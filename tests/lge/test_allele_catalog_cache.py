@@ -368,3 +368,79 @@ def test_export_identity_drift_fails_with_exact_retained_output_receipt(
     (cache / "cache-export-provenance.json").write_text(canonical_json(receipt))
     with pytest.raises(ValueError, match="complete successfully"):
         cache_api.load_discovery_cache(cache, targets=targets, config=config)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_cache_copy_mutations_and_relocation_are_independent(
+    tmp_path, monkeypatch, fallback
+):
+    import hashlib
+    import shutil
+
+    from primalscheme3.panel import allele_catalog_cache as cache_api
+    from primalscheme3.panel import immutable_copy
+
+    if fallback:
+        monkeypatch.setattr(immutable_copy, "_clonefile_api", lambda: None)
+    source = tmp_path / "panel"
+    targets, config, _ = fixture_panel(source)
+    cache = tmp_path / "cache"
+    cache_api.export_panel_discovery_cache(source, cache, argv=["export-cache"])
+    source_db, cached_db = (
+        source / "history/history.sqlite",
+        cache / "history/history.sqlite",
+    )
+    expected = hashlib.sha256(cached_db.read_bytes()).hexdigest()
+    assert source_db.stat().st_ino != cached_db.stat().st_ino
+    with source_db.open("r+b") as handle:
+        handle.write(b"modified-source")
+    assert hashlib.sha256(cached_db.read_bytes()).hexdigest() == expected
+    shutil.rmtree(source)
+    reuse = cache_api.load_discovery_cache(cache, targets=targets, config=config)
+    local = cache_api.materialize_cache_reuse(
+        reuse, tmp_path / "first", history=CoverageHistory(None, run_id="first")
+    )
+    local_db = local / "history/history.sqlite"
+    assert local_db.stat().st_ino != cached_db.stat().st_ino
+    with local_db.open("r+b") as handle:
+        handle.write(b"modified-destination")
+    assert hashlib.sha256(cached_db.read_bytes()).hexdigest() == expected
+    shutil.rmtree(local)
+    second = cache_api.materialize_cache_reuse(
+        reuse, tmp_path / "second", history=CoverageHistory(None, run_id="second")
+    )
+    shutil.rmtree(cache)
+    moved = tmp_path / "moved-origin"
+    second.rename(moved)
+    assert (
+        cache_api.load_discovery_cache(moved, targets=targets, config=config).catalog
+        == reuse.catalog
+    )
+
+
+def test_copied_cache_bytes_still_verified_after_clone_or_fallback(
+    tmp_path, monkeypatch
+):
+    from primalscheme3.panel import allele_catalog_cache as cache_api
+
+    targets, config, _ = fixture_panel(tmp_path / "panel")
+    cache_api.export_panel_discovery_cache(
+        tmp_path / "panel", tmp_path / "cache", argv=["export-cache"]
+    )
+    reuse = cache_api.load_discovery_cache(
+        tmp_path / "cache", targets=targets, config=config
+    )
+    original = cache_api.copy_immutable_file
+
+    def altered(source, destination):
+        result = original(source, destination)
+        if destination.name == "history.sqlite":
+            with destination.open("r+b") as handle:
+                handle.write(b"changed-after-copy")
+        return result
+
+    monkeypatch.setattr(cache_api, "copy_immutable_file", altered)
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        cache_api.materialize_cache_reuse(
+            reuse, tmp_path / "result", history=CoverageHistory(None, run_id="tamper")
+        )
