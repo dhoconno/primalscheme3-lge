@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from scripts.benchmark_legacy_salvage import geometry, strict_fingerprint, stamp
@@ -24,7 +23,7 @@ def test_benchmark_geometry_reports_per_target_unions_and_denominators(tmp_path)
     report = geometry(panel)
     assert report["referenceLengths"] == {"chrA": 6, "chrB": 8}
     assert report["fullSpan"]["chrA"]["unionBases"] == 6
-    assert report["primerTrimmedInterior"]["chrA"]["percentReferenceCovered"] == 50.0
+    assert report["primerTrimmedInterior"]["chrA"]["percentReferenceCovered"] == 100 * 4 / 6
 
 
 def test_duplicate_basename_inputs_are_distinct_stamped_records(tmp_path):
