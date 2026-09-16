@@ -140,7 +140,11 @@ def run_one(name: str, argv: list[str]) -> dict[str, object]:
     output = Path(argv[argv.index("--output") + 1])
     started = time.monotonic()
     started_at = datetime.now(timezone.utc).isoformat()
-    proc = subprocess.Popen(argv, cwd=Path(__file__).resolve().parents[1], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    stdout_path = OUT / f"{name}.stdout.log"
+    stderr_path = OUT / f"{name}.stderr.log"
+    stdout_file = stdout_path.open("w")
+    stderr_file = stderr_path.open("w")
+    proc = subprocess.Popen(argv, cwd=Path(__file__).resolve().parents[1], stdout=stdout_file, stderr=stderr_file, text=True, start_new_session=True)
     peak_rss = 0
     deadline = started + 600
     try:
@@ -151,8 +155,7 @@ def run_one(name: str, argv: list[str]) -> dict[str, object]:
         if psutil is not None:
             try:
                 process = psutil.Process(proc.pid)
-                peak_rss = max(peak_rss, process.memory_info().rss)
-                peak_rss = max(peak_rss, *(child.memory_info().rss for child in process.children(recursive=True)))
+                peak_rss = max(peak_rss, sum([process.memory_info().rss, *(child.memory_info().rss for child in process.children(recursive=True))]))
             except psutil.Error:
                 pass
         else:
@@ -166,13 +169,15 @@ def run_one(name: str, argv: list[str]) -> dict[str, object]:
             os.killpg(proc.pid, 9)
             break
         time.sleep(0.25)
-    stdout, stderr = proc.communicate()
+    proc.wait()
+    stdout_file.close()
+    stderr_file.close()
+    stdout = stdout_path.read_text()
+    stderr = stderr_path.read_text()
     if proc.returncode is None:
         proc.wait()
     elapsed = time.monotonic() - started
     output.mkdir(parents=True, exist_ok=True)
-    (OUT / f"{name}.stdout.log").write_text(stdout)
-    (OUT / f"{name}.stderr.log").write_text(stderr)
     receipt = {"name": name, "argv": argv, "command": shlex.join(argv), "startedAt": started_at, "wallTimeSeconds": elapsed, "exitStatus": proc.returncode, "stderr": stderr, "rssBytes": peak_rss, "runtime": {"python": sys.version, "platform": platform.platform()}, "inputs": [stamp(x) for x in MSAS], "outputs": [stamp(x) for x in sorted(output.rglob("*")) if x.is_file()]}
     if (output / "primer.bed").exists():
         receipt["strictFingerprintOrFinalFingerprint"] = strict_fingerprint(output)
