@@ -155,6 +155,13 @@ def run_one(name: str, argv: list[str]) -> dict[str, object]:
                 peak_rss = max(peak_rss, *(child.memory_info().rss for child in process.children(recursive=True)))
             except psutil.Error:
                 pass
+        else:
+            try:
+                # macOS ``ps`` reports resident KB for the native process;
+                # ncores=1 means the process group has no worker fan-out.
+                peak_rss = max(peak_rss, int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(proc.pid)], text=True).strip() or 0) * 1024)
+            except (ValueError, subprocess.SubprocessError):
+                pass
         if time.monotonic() >= deadline or peak_rss > 8 * 1024**3:
             os.killpg(proc.pid, 9)
             break
