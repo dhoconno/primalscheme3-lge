@@ -34,6 +34,49 @@ Repeat `--msa` for each target. Output must be a new directory. Supply the origi
 
 The strict dimer cutoff remains −26. The score is the native numerical score, not free energy or a probability. Chemistry is defined by complete versioned profiles; ad hoc temperature/salt overrides are not silently accepted. Both profiles use the same modeled temperature window. That compatibility does not establish laboratory performance.
 
+### Discovery history detail
+
+Native allele-aware panel creation defaults to compact discovery history:
+
+```sh
+primalscheme3 panel-create ... --selection-algorithm allele-coverage \
+  --discovery-history compact
+```
+
+Compact mode runs the same chemistry, mapping, site merge, profile membership,
+family geometry and selector inputs as full mode. It records bounded target and
+profile summaries, workers and enumeration boundaries while omitting the
+per-attempt origin payloads and discovery assessments. Use
+`--discovery-history full` for the advanced comparison/debug mode when detailed
+discovery evidence is needed. Compact and full catalog digests may differ
+because their recorded detail differs; compare site/family IDs, sequences,
+footprints, profile membership and fixed-work selector results for scientific
+parity. The compact history snapshot is complete only for its declared summary
+scope, and does not reconstruct omitted attempt chronology.
+
+Detailed discovery is available as an explicit bounded replay for one stored
+site or family. It reads the completed source panel and writes a separate
+result directory; it does not mutate the source or claim to explain why an
+optimizer omitted an entity:
+
+```sh
+primalscheme3 panel-discovery-diagnose \
+  --bundle /absolute/path/panel \
+  --site-id OligoSite-... \
+  --output /absolute/path/site-discovery-replay
+
+primalscheme3 panel-discovery-diagnose \
+  --bundle /absolute/path/panel \
+  --family-id CandidateFamily-... \
+  --output /absolute/path/family-discovery-replay
+```
+
+Exactly one of `--site-id` or `--family-id` is required. The replay report is
+labeled reconstructed anchored discovery and records the source bindings,
+runtime identity and provenance for the bounded anchor slice. It rejects
+tampered or drifted inputs/settings rather than inventing an exact historical
+trace.
+
 ## Search effort
 
 ### Versioned search effort
@@ -100,7 +143,15 @@ Strict remains the primary exported scheme unless `--primary-tier salvage-1` (or
 
 ## Retained history, audits and reuse
 
-The output retains generated sites, physical oligos, amplicon families, explored exact subsets, raw evidence, assessments, transitions, and stage snapshots. A failed candidate remains discoverable. “Not explored within budget” is distinct from “rejected by a measured constraint.” A compatible subset can remain selected after a conflicting member is removed, with the resulting allele-support loss recorded.
+Full discovery history retains generated sites, physical oligos, amplicon
+families, raw evidence, discovery assessments, transitions, and stage snapshots.
+Compact history retains the same scientific catalog and selector inputs plus
+bounded discovery summaries, while selector decision history and fresh final
+validation remain recorded in both modes. A failed candidate remains
+discoverable when it is a concrete catalog site. “Not explored within budget”
+is distinct from “rejected by a measured constraint.” A compatible subset can
+remain selected after a conflicting member is removed, with the resulting
+allele-support loss recorded.
 
 ```sh
 primalscheme3 panel-history --bundle /absolute/path/panel \

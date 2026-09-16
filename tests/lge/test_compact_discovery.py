@@ -174,3 +174,68 @@ def test_compact_skips_diagnostic_record_construction(monkeypatch):
         (target,), config, indexes=indexes, history=history, history_detail="compact"
     )
     assert catalog.sites and catalog.families
+
+
+def test_fixed_work_selector_parity_and_same_mode_catalog_repeatability():
+    from primalscheme3.panel.allele_search import (
+        AlleleSearchOptions,
+        AlleleWorkLimits,
+        search_allele_assignments,
+    )
+    from primalscheme3.panel.allele_validation import AlleleConstraintProfile
+    from primalscheme3.panel.coverage_types import ConfigurationLedger
+
+    target, config, indexes = _fixture()
+    # The low-level fixture is intentionally independent of Config's CLI mode;
+    # supply the positive specificity bound required by the selector profile.
+    config.mismatch_product_size = 2000
+    compact_a = build_variant_catalog(
+        (target,), config, indexes=indexes, history_detail="compact"
+    )
+    compact_b = build_variant_catalog(
+        (target,), config, indexes=indexes, history_detail="compact"
+    )
+    full_a = build_variant_catalog(
+        (target,), config, indexes=indexes, history_detail="full"
+    )
+    full_b = build_variant_catalog(
+        (target,), config, indexes=indexes, history_detail="full"
+    )
+    assert compact_a.semantic_digest == compact_b.semantic_digest
+    assert full_a.semantic_digest == full_b.semantic_digest
+    assert _projection(compact_a) == _projection(full_a)
+
+    options = AlleleSearchOptions(
+        coverage_target=0.95,
+        starts=1,
+        repair_rounds=0,
+        time_limit=120,
+        subset_expansion_limit=8,
+        work_limits=AlleleWorkLimits(
+            frontier_candidates=8,
+            construction_candidate_attempts=32,
+            repair_candidate_probes_per_round=8,
+            repair_neighborhoods_per_round=8,
+            repair_trials_per_round=8,
+            pool_lookahead_candidates=2,
+            cleanup_moves_per_round=8,
+            families_per_refresh=4,
+        ),
+    )
+    profile = AlleleConstraintProfile.from_config(
+        config, max_amplicons=None, max_amplicons_msa=None
+    )
+
+    def select(catalog):
+        return search_allele_assignments(
+            catalog,
+            profile,
+            options,
+            ConfigurationLedger(catalog.semantic_digest, ()),
+        )
+
+    compact_result = select(compact_a)
+    full_result = select(full_a)
+    assert compact_result.assignments == full_result.assignments
+    assert compact_result.objective == full_result.objective
+    assert compact_result.metadata["proposal_work"] == full_result.metadata["proposal_work"]
