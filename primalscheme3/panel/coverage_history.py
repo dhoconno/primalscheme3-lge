@@ -616,9 +616,15 @@ class SQLiteCoverageHistory(CoverageHistory):
                 ('evidence', 'assessments', snapshot.assessments_count, snapshot.evidence_count),
                 ('assessment', 'events', snapshot.events_count, snapshot.assessments_count),
                 ('parent', 'events', snapshot.events_count, snapshot.events_count)):
-            if self._db.execute('''SELECT 1 FROM record_links l JOIN records s ON s.id=l.source_id
+            if self.format_version == 2:
+                closure_query = '''SELECT 1 FROM record_links_int l JOIN records s ON s.position=l.source_key
+                    JOIN records t ON t.position=l.target_key WHERE l.kind=? AND s.stream=?
+                    AND s.ordinal<? AND t.ordinal>=? LIMIT 1'''
+            else:
+                closure_query = '''SELECT 1 FROM record_links l JOIN records s ON s.id=l.source_id
                     JOIN records t ON t.id=l.target_id WHERE l.kind=? AND s.stream=?
-                    AND s.ordinal<? AND t.ordinal>=? LIMIT 1''', (kind, source_stream, source_count, target_count)).fetchone():
+                    AND s.ordinal<? AND t.ordinal>=? LIMIT 1'''
+            if self._db.execute(closure_query, (kind, source_stream, source_count, target_count)).fetchone():
                 raise ValueError('checkpoint references uncommitted prefix')
         if snapshot.completeness == 'complete':
             inherited = self._resolved_dispositions(prior) if prior else {}
