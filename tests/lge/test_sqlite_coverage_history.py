@@ -165,3 +165,13 @@ def test_event_range_iterator_preserves_chronological_offsets(tmp_path):
         assert list(h.iter_events(start=7)) == []
         if hasattr(h, 'close'):
             h.close()
+
+
+def test_sqlite_page_cache_default_preserves_durability_settings(tmp_path):
+    with history.SQLiteCoverageHistory(tmp_path, run_id='run') as h:
+        assert history.SQLITE_PAGE_CACHE_KIB == 65536
+        assert h._db.execute('PRAGMA cache_size').fetchone()[0] == -65536
+        assert h._db.execute('PRAGMA synchronous').fetchone()[0] == 2
+        assert h._db.execute('PRAGMA journal_mode').fetchone()[0] == 'delete'
+        assert h._db.execute('PRAGMA foreign_keys').fetchone()[0] == 1
+        assert h.batch_size == 1000

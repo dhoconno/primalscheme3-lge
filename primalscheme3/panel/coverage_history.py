@@ -308,6 +308,11 @@ from collections.abc import Sequence
 from itertools import islice
 
 
+# Bounded 100/500-anchor probes favored 64 MiB over 8 MiB; 256 MiB did
+# not improve the larger probe. Keep FULL/DELETE and the commit cadence intact.
+SQLITE_PAGE_CACHE_KIB = 64 * 1024
+
+
 class _DiskSequence(Sequence):
     def __init__(self, owner, stream):
         self.owner, self.stream = owner, stream
@@ -379,7 +384,7 @@ class SQLiteCoverageHistory(CoverageHistory):
             self._db.execute('PRAGMA foreign_keys=ON')
             self._db.execute('PRAGMA synchronous=FULL')
             self._db.execute('PRAGMA journal_mode=DELETE')
-            self._db.execute('PRAGMA cache_size=-8192')
+            self._db.execute(f'PRAGMA cache_size=-{SQLITE_PAGE_CACHE_KIB}')
             self._db.execute('PRAGMA temp_store=FILE')
             self._db.executescript('''
                 CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
