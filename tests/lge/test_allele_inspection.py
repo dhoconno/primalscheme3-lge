@@ -16,12 +16,12 @@ def api():
     return allele_inspection
 
 
-def history_bundle(path):
+def history_bundle(path, format_version=2):
     path.mkdir()
     (path / "panel-optimizer.json").write_text(
         json.dumps({"history": {"path": "history/history.sqlite"}})
     )
-    with SQLiteCoverageHistory(path / "history", run_id="test") as h:
+    with SQLiteCoverageHistory(path / "history", run_id="test", format_version=format_version) as h:
         evidence = h.record_evidence(
             entity_ids=("site",),
             measurement="native",
@@ -56,10 +56,11 @@ def history_bundle(path):
     return path
 
 
+@pytest.mark.parametrize("format_version", [1, 2])
 def test_indexed_history_filters_linked_evidence_and_bounded_lineage(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, format_version
 ):
-    bundle = history_bundle(tmp_path / "bundle")
+    bundle = history_bundle(tmp_path / "bundle", format_version=format_version)
     monkeypatch.setattr(
         SQLiteCoverageHistory,
         "__init__",
@@ -254,7 +255,7 @@ def test_region_queries_include_unselected_catalog_sites_and_grouped_conditions(
 def test_selected_corrupt_link_fails_closed(tmp_path):
     bundle = history_bundle(tmp_path / "bundle")
     db = sqlite3.connect(bundle / "history/history.sqlite")
-    db.execute("DELETE FROM record_links WHERE kind='evidence'")
+    db.execute("DELETE FROM record_links_int WHERE kind='evidence'")
     db.commit()
     db.close()
     with pytest.raises(ValueError, match="link"):
@@ -474,7 +475,8 @@ def test_query_rejects_forged_index_context(tmp_path):
         api().query_allele_history(bundle, entity="site", profile="forged")
 
 
-def test_origin_history_is_separate_and_independently_paginated(tmp_path):
+@pytest.mark.parametrize("origin_format", [1, 2])
+def test_origin_history_is_separate_and_independently_paginated(tmp_path, origin_format):
     from test_allele_validation import dna, fixture
 
     from primalscheme3.panel.allele_publication import _write, artifact_descriptor
@@ -483,8 +485,9 @@ def test_origin_history_is_separate_and_independently_paginated(tmp_path):
     cat, _, ledger = fixture(seq=dna(seed=0))
     origin = bundle / "origin-discovery"
     (origin / "history").mkdir(parents=True)
+    origin_source = history_bundle(tmp_path / "origin-source", format_version=origin_format)
     shutil.copyfile(
-        bundle / "history/history.sqlite", origin / "history/history.sqlite"
+        origin_source / "history/history.sqlite", origin / "history/history.sqlite"
     )
     with SQLiteCoverageHistory(origin / "history", run_id="test") as h:
         prior = h.complete_stage(

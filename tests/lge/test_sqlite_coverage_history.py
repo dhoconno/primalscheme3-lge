@@ -1,9 +1,10 @@
 """Disk history preserves scientific stream identity without retaining records."""
-import json
 import sqlite3
 import tracemalloc
 import zlib
+
 import pytest
+
 from primalscheme3.panel import coverage_history as history
 
 
@@ -23,9 +24,10 @@ def populate(h):
     return e, a, event, complete, tail, failed
 
 
-def test_sqlite_matches_memory_streams_hashes_queries_and_reload(tmp_path):
+@pytest.mark.parametrize('format_version', [1, 2])
+def test_sqlite_matches_memory_streams_hashes_queries_and_reload(tmp_path, format_version):
     memory = history.CoverageHistory(None, run_id='run')
-    disk = history.SQLiteCoverageHistory(tmp_path, run_id='run', batch_size=3)
+    disk = history.SQLiteCoverageHistory(tmp_path, run_id='run', batch_size=3, format_version=format_version)
     assert populate(memory) == populate(disk)
     for stream in ('evidence', 'assessments', 'events', 'snapshots'):
         assert tuple(getattr(memory, stream)) == tuple(getattr(disk, stream))
@@ -34,7 +36,7 @@ def test_sqlite_matches_memory_streams_hashes_queries_and_reload(tmp_path):
     expected = disk.last_complete_stage
     assert disk.latest_event('child').kind == 'reconsidered'
     disk.close()
-    loaded = history.SQLiteCoverageHistory(tmp_path, run_id='run')
+    loaded = history.SQLiteCoverageHistory(tmp_path, run_id='run', format_version=format_version)
     assert loaded.last_complete_stage == expected
     assert len(loaded.events) == 2
     assert loaded.latest_event('child').sequence_number == 1
@@ -55,8 +57,9 @@ def test_sqlite_reference_and_fresh_disposition_validation(tmp_path):
 
 
 @pytest.mark.parametrize('corruption', ['payload', 'deleted_prefix', 'entity_index', 'reference_index'])
-def test_sqlite_corruption_is_rejected_on_reload(tmp_path, corruption):
-    h = history.SQLiteCoverageHistory(tmp_path, run_id='run')
+@pytest.mark.parametrize('format_version', [1, 2])
+def test_sqlite_corruption_is_rejected_on_reload(tmp_path, format_version, corruption):
+    h = history.SQLiteCoverageHistory(tmp_path, run_id='run', format_version=format_version)
     populate(h)
     h.close()
     db = sqlite3.connect(tmp_path/'history.sqlite')
@@ -65,25 +68,29 @@ def test_sqlite_corruption_is_rejected_on_reload(tmp_path, corruption):
     elif corruption == 'deleted_prefix':
         db.execute("DELETE FROM records WHERE stream='evidence'")
     elif corruption == 'entity_index':
-        db.execute("DELETE FROM entity_records WHERE entity_id='site'")
+        db.execute("DELETE FROM entity_records WHERE entity_id='site'" if format_version == 1 else
+                   "DELETE FROM entity_records_int WHERE entity_key=(SELECT entity_key FROM entities WHERE canonical_id='site')")
     else:
-        db.execute("DELETE FROM record_links WHERE kind='evidence'")
-    db.commit(); db.close()
+        db.execute("DELETE FROM " + ('record_links' if format_version == 1 else 'record_links_int') + " WHERE kind='evidence'")
+    db.commit()
+    db.close()
     with pytest.raises(ValueError, match='corrupt|checkpoint|reference|index|prefix'):
-        history.SQLiteCoverageHistory(tmp_path, run_id='run')
+        history.SQLiteCoverageHistory(tmp_path, run_id='run', format_version=format_version)
 
 
-def test_sqlite_checkpoint_tail_and_portable_backup(tmp_path):
-    h = history.SQLiteCoverageHistory(tmp_path/'source', run_id='run', batch_size=100)
+@pytest.mark.parametrize('format_version', [1, 2])
+def test_sqlite_checkpoint_tail_and_portable_backup(tmp_path, format_version):
+    h = history.SQLiteCoverageHistory(tmp_path/'source', run_id='run', batch_size=100, format_version=format_version)
     strict = h.emit(stage_id='strict', kind='generated', entity_ids=('site',))
     snapshot = h.complete_stage(stage_id='strict', dispositions={'site': 'selected'}, catalog_digest='c', ledger_digest='l')
     h.emit(stage_id='salvage', kind='attempted', entity_ids=('child',), parent_event_ids=(strict.id,))
     h.checkpoint()
     h.export_database(tmp_path/'portable'/'history.sqlite')
-    moved = history.SQLiteCoverageHistory(tmp_path/'portable', run_id='run')
+    moved = history.SQLiteCoverageHistory(tmp_path/'portable', run_id='run', format_version=format_version)
     assert moved.last_complete_stage == snapshot
     assert len(moved.events) == 2 and len(moved.snapshots) == 1
-    moved.close(); h.close()
+    moved.close()
+    h.close()
 
 
 def test_sqlite_record_storage_memory_does_not_grow_with_payload_volume(tmp_path):
@@ -100,18 +107,19 @@ def test_sqlite_record_storage_memory_does_not_grow_with_payload_volume(tmp_path
     h.close()
 
 
-def test_crash_retains_committed_batch_and_discards_only_pending_tail(tmp_path):
+@pytest.mark.parametrize('format_version', [1, 2])
+def test_crash_retains_committed_batch_and_discards_only_pending_tail(tmp_path, format_version):
     import subprocess
     import sys
     script = '''
 import os, sys
 from primalscheme3.panel.coverage_history import SQLiteCoverageHistory
-h=SQLiteCoverageHistory(sys.argv[1], run_id='crash', batch_size=2)
+h=SQLiteCoverageHistory(sys.argv[1], run_id='crash', batch_size=2, format_version=int(sys.argv[2]))
 for i in range(3):
     h.emit(stage_id='discovery',kind='generated',entity_ids=(str(i),))
 os._exit(0)
 '''
-    subprocess.run([sys.executable, '-c', script, str(tmp_path)], check=True)
+    subprocess.run([sys.executable, '-c', script, str(tmp_path), str(format_version)], check=True)
     with history.SQLiteCoverageHistory(tmp_path, run_id='crash') as h:
         assert len(h.events) == 2
         assert h.events[-1].entity_ids == ('1',)
@@ -122,10 +130,12 @@ os._exit(0)
         assert h.events[-1].sequence_number == 2
 
 
-def test_valid_snapshot_identity_with_wrong_prefix_hash_is_rejected(tmp_path):
+@pytest.mark.parametrize('format_version', [1, 2])
+def test_valid_snapshot_identity_with_wrong_prefix_hash_is_rejected(tmp_path, format_version):
     from dataclasses import replace
+
     from primalscheme3.panel.coverage_types import canonical_json
-    with history.SQLiteCoverageHistory(tmp_path, run_id='run') as h:
+    with history.SQLiteCoverageHistory(tmp_path, run_id='run', format_version=format_version) as h:
         h.emit(stage_id='strict', kind='generated', entity_ids=('site',))
         original = h.complete_stage(stage_id='strict', dispositions={'site': 'selected'}, catalog_digest='c', ledger_digest='l')
     corrupt = replace(original, events_digest='history-events-wrong')
@@ -133,11 +143,12 @@ def test_valid_snapshot_identity_with_wrong_prefix_hash_is_rejected(tmp_path):
         db.execute("UPDATE records SET id=?,payload=? WHERE stream='snapshots'",
                    (corrupt.id, zlib.compress(canonical_json(corrupt).encode())))
     with pytest.raises(ValueError, match='prefix hash mismatch'):
-        history.SQLiteCoverageHistory(tmp_path, run_id='run')
+        history.SQLiteCoverageHistory(tmp_path, run_id='run', format_version=format_version)
 
 
 def test_sqlite_discovery_catalog_and_exported_records_match_memory(tmp_path):
     import gzip
+
     from primalscheme3.core.config import Config
     from primalscheme3.panel.coverage_discovery import build_variant_catalog
     from primalscheme3.panel.coverage_types import Target

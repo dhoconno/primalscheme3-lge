@@ -35,7 +35,7 @@ def replace_manifest_receipts(cache, manifest):
     receipt_path.write_text(canonical_json(receipt))
 
 
-def fixture_panel(path):
+def fixture_panel(path, format_version=2):
     from time import monotonic
 
     from primalscheme3.panel.coverage_provenance import (
@@ -63,7 +63,7 @@ def fixture_panel(path):
     )
     start = capture_execution_identity([raw])
     started = monotonic()
-    history = SQLiteCoverageHistory(path / "history", run_id="fixture")
+    history = SQLiteCoverageHistory(path / "history", run_id="fixture", format_version=format_version)
     catalog = build_variant_catalog(targets, config, history=history)
     history.close()
     with gzip.open(path / "stages/strict/catalog.json.gz", "wt") as f:
@@ -103,14 +103,15 @@ def fixture_panel(path):
     return targets, config, catalog
 
 
-def test_union_cache_projection_exactly_matches_fresh_profile_discovery(tmp_path):
+@pytest.mark.parametrize("format_version", [1, 2])
+def test_union_cache_projection_exactly_matches_fresh_profile_discovery(tmp_path, format_version):
     from primalscheme3.panel.allele_catalog_cache import (
         export_panel_discovery_cache,
         load_discovery_cache,
         materialize_cache_reuse,
     )
 
-    targets, config, union = fixture_panel(tmp_path / "panel")
+    targets, config, union = fixture_panel(tmp_path / "panel", format_version=format_version)
     cache = tmp_path / "cache"
     export_panel_discovery_cache(tmp_path / "panel", cache, argv=["export-cache"])
     for name in ("normal", "high-gc"):
@@ -128,7 +129,8 @@ def test_union_cache_projection_exactly_matches_fresh_profile_discovery(tmp_path
         fresh = build_variant_catalog(targets, config, profiles=profiles)
         assert fresh.sites and fresh.families
         assert reuse.catalog.to_dict() == fresh.to_dict()
-        history = CoverageHistory(None, run_id="new-selection")
+        history = SQLiteCoverageHistory(tmp_path / (name + "-history"), run_id="new-selection")
+        assert history.format_version == 2
         destination = materialize_cache_reuse(reuse, tmp_path / name, history=history)
         assert (destination / "history/history.sqlite").read_bytes() == (
             cache / "history/history.sqlite"
@@ -138,6 +140,7 @@ def test_union_cache_projection_exactly_matches_fresh_profile_discovery(tmp_path
             and history.events[0].kind == "reused-discovery-cache"
         )
         assert not history.assessments
+        history.close()
     changed = Config(
         selection_algorithm="allele-coverage",
         amplicon_size=60,

@@ -13,7 +13,11 @@ from importlib.metadata import version
 from pathlib import Path
 
 from .allele_publication import _read, _targets, artifact_descriptor, audit_allele_stage
-from .coverage_history import CoverageHistory, SQLiteCoverageHistory
+from .coverage_history import (
+    CoverageHistory,
+    SQLiteCoverageHistory,
+    sqlite_history_format,
+)
 from .coverage_provenance import runtime_identity, source_identity
 from .coverage_types import ConfigurationLedger, VariantCatalog, canonical_json
 
@@ -160,8 +164,7 @@ def _query_history(
     try:
         db.execute("PRAGMA query_only=ON")
         metadata = dict(db.execute("SELECT key,value FROM metadata"))
-        if metadata.get("schema") != "primalscheme3.sqlite-history/v1":
-            raise ValueError("unsupported history schema")
+        sqlite_history_format(db, metadata)
 
         def decode(row):
             position, stream, ordinal, identity, payload = row

@@ -79,3 +79,29 @@ History regions are zero-based, half-open reference intervals; pool numbers are 
 Add `--reuse-discovery /absolute/path/new-discovery-cache` to a compatible design command. Reuse verifies original target order/content, discovery settings, chemistry and scientific source/runtime fingerprints; incompatible caches fail closed. Copied origin history is explicitly distinguished from the new run's decisions. Reuse does not carry forward an old selection verdict.
 
 All outputs preserve exact invocation, requested and resolved options, versions/runtime, stored paths, hashes/sizes, elapsed time and exit status. Original input paths are provenance origins; retained payloads remain usable after relocation.
+
+### History database compatibility
+
+New persistent histories use `primalscheme3.sqlite-history/v2`. Scientific record
+IDs, compressed canonical payloads, record order, stage snapshots and exported
+JSONL remain unchanged. The physical database stores entity and record relations
+with integer foreign keys; canonical-ID SQL views preserve the reader contract.
+
+Existing `primalscheme3.sqlite-history/v1` databases remain readable and
+appendable in their original format. Opening, inspecting, auditing or reusing a
+history never migrates it. A v1 cache origin may accompany a new v2 selection
+history. Older tools that support only v1 must reject v2 rather than treating it
+as v1; use a current reader for v2 outputs.
+
+Both formats retain SQLite `synchronous=FULL`, `journal_mode=DELETE`, a 64 MiB
+page cache and the default 1,000-record transaction batch. Stage completion,
+explicit checkpoints and close commit durably. A killed writer can lose its
+uncommitted batch; the committed prefix and completed snapshots remain valid.
+
+For Python integrations, `SQLiteCoverageHistory(..., format_version=1)` explicitly
+creates a new v1 history; the default is 2. The argument controls creation only:
+an existing database always uses its recorded format. `rollback()` discards the
+whole pending batch and reloads the durable prefix. Relation-write or commit
+errors also roll back the pending batch. Callers must not continue using record
+objects returned from a batch that was rolled back. The bounded entity-key cache
+belongs to one writer and is cleared on rollback and close.

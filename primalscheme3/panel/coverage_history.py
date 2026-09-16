@@ -4,14 +4,25 @@ A single coordinator owns a history writer. Workers return evidence batches;
 callers merge them deterministically before assigning event sequence numbers.
 """
 from __future__ import annotations
-from dataclasses import dataclass, field
+
 import gzip
 import hashlib
 import json
 import os
+import sqlite3
+import zlib
+from collections import OrderedDict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from itertools import islice
 from pathlib import Path
-from typing import Mapping, Any
-from primalscheme3.panel.coverage_types import ScientificRecord, canonical_json, semantic_id
+from typing import Any
+
+from primalscheme3.panel.coverage_types import (
+    ScientificRecord,
+    canonical_json,
+    semantic_id,
+)
 
 OUTCOMES = frozenset(('pass', 'fail', 'unknown', 'not-evaluated'))
 
@@ -302,15 +313,32 @@ class CoverageHistory:
 
 # The JSONL implementation above remains the compatibility default. Production
 # runs may explicitly select this disk-backed implementation of the same API.
-import sqlite3
-import zlib
-from collections.abc import Sequence
-from itertools import islice
 
 
 # Bounded 100/500-anchor probes favored 64 MiB over 8 MiB; 256 MiB did
 # not improve the larger probe. Keep FULL/DELETE and the commit cadence intact.
 SQLITE_PAGE_CACHE_KIB = 64 * 1024
+SQLITE_ENTITY_CACHE_SIZE = 32768
+SQLITE_HISTORY_SCHEMAS = frozenset(('primalscheme3.sqlite-history/v1', 'primalscheme3.sqlite-history/v2'))
+
+
+def sqlite_history_format(connection, metadata=None):
+    """Validate the explicit physical format without writing or migrating it."""
+    if metadata is None:
+        metadata = dict(connection.execute('SELECT key,value FROM metadata'))
+    schema = metadata.get('schema')
+    if schema not in SQLITE_HISTORY_SCHEMAS:
+        raise ValueError('unsupported history schema')
+    version = int(schema.rsplit('v', 1)[1])
+    objects = dict(connection.execute("SELECT name,type FROM sqlite_master WHERE type IN ('table','view')"))
+    required = {'metadata': 'table', 'records': 'table',
+                'entity_records': 'table' if version == 1 else 'view',
+                'record_links': 'table' if version == 1 else 'view'}
+    if version == 2:
+        required.update(entities='table', entity_records_int='table', record_links_int='table')
+    if any(objects.get(name) != kind for name, kind in required.items()):
+        raise ValueError('corrupt history physical schema')
+    return version
 
 
 class _DiskSequence(Sequence):
@@ -363,12 +391,18 @@ class SQLiteCoverageHistory(CoverageHistory):
     Stream properties are lazy read-only sequences. Every batch, checkpoint(),
     complete_stage(), and close() commits with SQLite synchronous=FULL. A crash
     can lose only the current uncommitted batch; completed stages are durable.
+    New histories use integer-relation v2; format_version=1 creates legacy v1.
+    Existing histories always retain their detected format, without migration.
+    rollback() discards the entire pending batch and restores the durable prefix.
     Reload verifies payload identities, references, indexes and snapshot hashes
     without materializing full record streams. One writer owns the connection.
     """
-    def __init__(self, directory: Path, *, run_id: str, batch_size: int = 1000):
+    def __init__(self, directory: Path, *, run_id: str, batch_size: int = 1000, format_version: int = 2):
         if type(batch_size) is not int or batch_size < 1:
             raise ValueError('batch_size must be a positive integer')
+        if type(format_version) is not int or format_version not in (1, 2):
+            raise ValueError('format_version must be 1 or 2 for a new history')
+        self._entity_key_cache = OrderedDict()
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.run_id, self.batch_size = run_id, batch_size
@@ -386,37 +420,107 @@ class SQLiteCoverageHistory(CoverageHistory):
             self._db.execute('PRAGMA journal_mode=DELETE')
             self._db.execute(f'PRAGMA cache_size=-{SQLITE_PAGE_CACHE_KIB}')
             self._db.execute('PRAGMA temp_store=FILE')
-            self._db.executescript('''
-                CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS records(
-                    position INTEGER PRIMARY KEY, stream TEXT NOT NULL, ordinal INTEGER NOT NULL,
-                    id TEXT NOT NULL UNIQUE, payload BLOB NOT NULL, stage_id TEXT, pool INTEGER, profile_id TEXT,
-                    UNIQUE(stream, ordinal));
-                CREATE INDEX IF NOT EXISTS records_filter ON records(stream, stage_id, pool, profile_id, ordinal);
-                CREATE TABLE IF NOT EXISTS entity_records(
-                    entity_id TEXT NOT NULL, stream TEXT NOT NULL, ordinal INTEGER NOT NULL,
-                    record_id TEXT NOT NULL REFERENCES records(id), PRIMARY KEY(entity_id, record_id));
-                CREATE INDEX IF NOT EXISTS entity_records_lookup ON entity_records(entity_id, stream, ordinal);
-                CREATE INDEX IF NOT EXISTS entity_records_record ON entity_records(record_id);
-                CREATE TABLE IF NOT EXISTS record_links(
-                    source_id TEXT NOT NULL REFERENCES records(id), target_id TEXT NOT NULL REFERENCES records(id),
-                    kind TEXT NOT NULL, PRIMARY KEY(source_id, target_id, kind));
-                CREATE INDEX IF NOT EXISTS record_links_target ON record_links(target_id, kind, source_id);
-            ''')
-            metadata = dict(self._db.execute('SELECT key,value FROM metadata'))
-            if not metadata:
-                if self._db.execute('SELECT 1 FROM records LIMIT 1').fetchone():
-                    raise ValueError('corrupt history: missing metadata')
+            # Detect an existing format before DDL. In particular v2 exposes
+            # read views where v1 has tables; opening either never migrates it.
+            tables = {row[0] for row in self._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if not tables:
+                self.format_version = format_version
+                self._create_schema()
                 self._db.executemany('INSERT INTO metadata VALUES (?,?)',
-                    [('schema', 'primalscheme3.sqlite-history/v1'), ('run_id', run_id), ('committed_counts', canonical_json(self._counts))])
+                    [('schema', f'primalscheme3.sqlite-history/v{format_version}'), ('run_id', run_id),
+                     ('committed_counts', canonical_json(self._counts))])
                 self._db.commit()
-            elif metadata.get('schema') != 'primalscheme3.sqlite-history/v1' or metadata.get('run_id') != run_id:
-                raise ValueError('history belongs to another run or unsupported schema')
+            else:
+                if 'metadata' not in tables:
+                    raise ValueError('corrupt history: missing metadata')
+                metadata = dict(self._db.execute('SELECT key,value FROM metadata'))
+                if metadata.get('schema') not in SQLITE_HISTORY_SCHEMAS or metadata.get('run_id') != run_id:
+                    raise ValueError('history belongs to another run or unsupported schema')
+                self.format_version = sqlite_history_format(self._db, metadata)
             self._reload()
         except Exception:
             self._db.close()
             self._closed = True
             raise
+
+    def _create_schema(self):
+        self._db.executescript("""
+            CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE records(
+                position INTEGER PRIMARY KEY, stream TEXT NOT NULL, ordinal INTEGER NOT NULL,
+                id TEXT NOT NULL UNIQUE, payload BLOB NOT NULL, stage_id TEXT, pool INTEGER, profile_id TEXT,
+                UNIQUE(stream, ordinal));
+            CREATE INDEX records_filter ON records(stream, stage_id, pool, profile_id, ordinal);
+        """)
+        if self.format_version == 1:
+            self._db.executescript("""
+                CREATE TABLE entity_records(
+                    entity_id TEXT NOT NULL, stream TEXT NOT NULL, ordinal INTEGER NOT NULL,
+                    record_id TEXT NOT NULL REFERENCES records(id), PRIMARY KEY(entity_id, record_id));
+                CREATE INDEX entity_records_lookup ON entity_records(entity_id, stream, ordinal);
+                CREATE INDEX entity_records_record ON entity_records(record_id);
+                CREATE TABLE record_links(
+                    source_id TEXT NOT NULL REFERENCES records(id), target_id TEXT NOT NULL REFERENCES records(id),
+                    kind TEXT NOT NULL, PRIMARY KEY(source_id, target_id, kind));
+                CREATE INDEX record_links_target ON record_links(target_id, kind, source_id);
+            """)
+        else:
+            self._db.executescript("""
+                CREATE TABLE entities(entity_key INTEGER PRIMARY KEY, canonical_id TEXT NOT NULL UNIQUE);
+                CREATE TABLE entity_records_int(
+                    entity_key INTEGER NOT NULL REFERENCES entities(entity_key), stream TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL, record_key INTEGER NOT NULL REFERENCES records(position),
+                    PRIMARY KEY(entity_key, record_key));
+                CREATE INDEX entity_int_lookup ON entity_records_int(entity_key, stream, ordinal);
+                CREATE INDEX entity_int_record ON entity_records_int(record_key);
+                CREATE TABLE record_links_int(
+                    source_key INTEGER NOT NULL REFERENCES records(position),
+                    target_key INTEGER NOT NULL REFERENCES records(position), kind TEXT NOT NULL,
+                    PRIMARY KEY(source_key, target_key, kind));
+                CREATE INDEX links_int_target ON record_links_int(target_key, kind, source_key);
+                CREATE VIEW entity_records AS
+                    SELECT e.canonical_id entity_id,x.stream,x.ordinal,r.id record_id
+                    FROM entity_records_int x JOIN entities e ON e.entity_key=x.entity_key
+                    JOIN records r ON r.position=x.record_key;
+                CREATE VIEW record_links AS
+                    SELECT s.id source_id,t.id target_id,x.kind
+                    FROM record_links_int x JOIN records s ON s.position=x.source_key
+                    JOIN records t ON t.position=x.target_key;
+            """)
+
+    def _entity_key(self, identity):
+        cached = self._entity_key_cache.get(identity)
+        if cached is not None:
+            self._entity_key_cache.move_to_end(identity)
+            return cached
+        self._db.execute('INSERT OR IGNORE INTO entities(canonical_id) VALUES (?)', (identity,))
+        key = self._db.execute('SELECT entity_key FROM entities WHERE canonical_id=?', (identity,)).fetchone()[0]
+        self._entity_key_cache[identity] = key
+        if len(self._entity_key_cache) > SQLITE_ENTITY_CACHE_SIZE:
+            self._entity_key_cache.popitem(last=False)
+        return key
+
+    def _insert_relations(self, stream, ordinal, record):
+        entities = set(getattr(record, 'entity_ids', ()))
+        links = self._links(record)
+        if self.format_version == 1:
+            self._db.executemany('INSERT INTO entity_records VALUES (?,?,?,?)',
+                                 ((e, stream, ordinal, record.id) for e in entities))
+            self._db.executemany('INSERT INTO record_links VALUES (?,?,?)',
+                                 ((record.id, target, kind) for target, kind, _ in links))
+            return
+        for entity in entities:
+            written = self._db.execute(
+                'INSERT INTO entity_records_int SELECT ?,?,?,position FROM records WHERE id=?',
+                (self._entity_key(entity), stream, ordinal, record.id))
+            if written.rowcount != 1:
+                raise ValueError('missing entity relation source record')
+        for target, kind, _ in links:
+            written = self._db.execute("""INSERT INTO record_links_int
+                SELECT s.position,t.position,? FROM records s,records t WHERE s.id=? AND t.id=?""",
+                (kind, record.id, target))
+            if written.rowcount != 1:
+                raise ValueError('missing history relation source or target record')
 
     def _decode(self, stream, payload):
         try:
@@ -534,18 +638,22 @@ class SQLiteCoverageHistory(CoverageHistory):
         ordinal = self._counts[stream]
         self._validate_disk_record(stream, record, ordinal)
         raw = canonical_json(record).encode()
-        self._db.execute('INSERT INTO records(stream,ordinal,id,payload,stage_id,pool,profile_id) VALUES (?,?,?,?,?,?,?)',
-                         (stream, ordinal, record.id, zlib.compress(raw, level=1), getattr(record, 'stage_id', None),
-                          getattr(record, 'pool', None), getattr(record, 'profile_id', None)))
-        self._db.executemany('INSERT INTO entity_records VALUES (?,?,?,?)',
-                             ((e, stream, ordinal, record.id) for e in set(getattr(record, 'entity_ids', ()))))
-        self._db.executemany('INSERT INTO record_links VALUES (?,?,?)',
-                             ((record.id, target, kind) for target, kind, _ in self._links(record)))
-        self._update_hash(stream, raw)
-        self._counts[stream] += 1
-        self._pending += 1
-        if self._pending >= self.batch_size or stream == 'snapshots':
-            self.checkpoint()
+        try:
+            self._db.execute('INSERT INTO records(stream,ordinal,id,payload,stage_id,pool,profile_id) VALUES (?,?,?,?,?,?,?)',
+                             (stream, ordinal, record.id, zlib.compress(raw, level=1), getattr(record, 'stage_id', None),
+                              getattr(record, 'pool', None), getattr(record, 'profile_id', None)))
+            self._insert_relations(stream, ordinal, record)
+            self._update_hash(stream, raw)
+            self._counts[stream] += 1
+            self._pending += 1
+            if self._pending >= self.batch_size or stream == 'snapshots':
+                self.checkpoint()
+        except BaseException:
+            # Cancellation also must not leave a partial record for close().
+            # A partially written record must never survive into a later commit.
+            # Restore hashes/counts along with the entire pending SQL batch.
+            self.rollback()
+            raise
         return record
 
     @property
@@ -579,15 +687,34 @@ class SQLiteCoverageHistory(CoverageHistory):
 
     def checkpoint(self):
         """Durably commit all current records, including an incomplete stage tail."""
-        self._db.execute("UPDATE metadata SET value=? WHERE key='committed_counts'", (canonical_json(self._counts),))
-        self._db.commit()
+        try:
+            self._db.execute("UPDATE metadata SET value=? WHERE key='committed_counts'", (canonical_json(self._counts),))
+            self._db.commit()
+            self._pending = 0
+        except BaseException:
+            self.rollback()
+            raise
+
+    def rollback(self):
+        """Discard the pending batch and restore the last durable prefix.
+
+        Entity row IDs may be reused after rollback, so no cached key survives.
+        """
+        self._entity_key_cache.clear()
+        self._db.rollback()
         self._pending = 0
+        self._counts = {name: 0 for name in self._streams}
+        self._hashes = {name: _history_hash_start(name) for name in self._streams}
+        self._reload()
 
     def close(self):
         if not self._closed:
-            self.checkpoint()
-            self._db.close()
-            self._closed = True
+            try:
+                self.checkpoint()
+            finally:
+                self._entity_key_cache.clear()
+                self._db.close()
+                self._closed = True
 
     def __enter__(self): return self
 
@@ -599,10 +726,11 @@ class SQLiteCoverageHistory(CoverageHistory):
             if entity_id is not None:
                 terms.append('EXISTS(SELECT 1 FROM entity_records e WHERE e.record_id=r.id AND e.entity_id=?)')
                 args.append(entity_id)
-            for field, value in (('stage_id', stage_id), ('pool', pool if assessment else None),
+            for column, value in (('stage_id', stage_id), ('pool', pool if assessment else None),
                                   ('profile_id', profile_id if assessment else None)):
                 if value is not None:
-                    terms.append('r.' + field + '=?'); args.append(value)
+                    terms.append('r.' + column + '=?')
+                    args.append(value)
             return 'SELECT r.id FROM records r WHERE ' + ' AND '.join(terms), args
         aq, ap = filtered('assessments', assessment=True)
         eq, ep = filtered('events')
@@ -653,7 +781,8 @@ class SQLiteCoverageHistory(CoverageHistory):
             output.write('{')
             for i, (identity,) in enumerate(self._db.execute("SELECT id FROM records WHERE stream='snapshots' ORDER BY id")):
                 snapshot = self._indexes['snapshots'][identity]
-                if i: output.write(',')
+                if i:
+                    output.write(',')
                 output.write(canonical_json(identity) + ':' + canonical_json(dict(stage_id=snapshot.stage_id,
                     completeness=snapshot.completeness, dispositions=self._resolved_dispositions(snapshot))))
             output.write('}')

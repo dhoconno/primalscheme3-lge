@@ -28,7 +28,7 @@ from .coverage_discovery import (
     discovery_profiles,
     variant_targets,
 )
-from .coverage_history import IntrinsicEvidence, StageSnapshot
+from .coverage_history import IntrinsicEvidence, StageSnapshot, sqlite_history_format
 from .coverage_provenance import runtime_identity, source_identity
 from .coverage_types import CandidateFamily, VariantCatalog, canonical_json
 from .immutable_copy import copy_immutable_file
@@ -155,8 +155,7 @@ def _discovery_snapshot(path, catalog):
         raise ValueError("origin history must be closed without journal sidecars")
     with _connection(path) as db:
         metadata = dict(db.execute("SELECT key,value FROM metadata"))
-        if metadata.get("schema") != "primalscheme3.sqlite-history/v1":
-            raise ValueError("unsupported origin history schema")
+        sqlite_history_format(db, metadata)
         found = None
         for (payload,) in db.execute(
             "SELECT payload FROM records WHERE stream='snapshots' AND stage_id='discovery' ORDER BY ordinal"
