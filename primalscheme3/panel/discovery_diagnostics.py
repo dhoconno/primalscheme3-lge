@@ -11,7 +11,6 @@ an optimizer did or did not select an entity.
 from __future__ import annotations
 
 import gzip
-import inspect
 import json
 import shutil
 from pathlib import Path
@@ -196,15 +195,18 @@ def _config_from_bundle(bundle: Path, optimizer: dict[str, Any]) -> Any:
     Arbitrary command strings and launcher state are intentionally excluded.
     The Config constructor validates the resulting resolved option set.
     """
+    from primalscheme3.core.config import Config
+
     from .allele_options import AlleleOptions
-    from .core.config import Config
 
     config_data = (
         _read(bundle / "config.json") if (bundle / "config.json").is_file() else {}
     )
-    allowed = set(dir(Config)) | {
-        field.name for field in __import__("dataclasses").fields(AlleleOptions)
-    }
+    allowed = (
+        set(dir(Config))
+        | {field.name for field in __import__("dataclasses").fields(AlleleOptions)}
+        | {"allele_options_json", "allele_requested_options_json"}
+    )
     kwargs = {
         key: value
         for key, value in config_data.items()
@@ -323,16 +325,13 @@ def _entity_binding(
 
 
 def _invoke_discovery(targets, config, *, profiles, indexes, history):
-    # Task 1 adds history_detail.  The fallback keeps old completed bundles
-    # readable on a pre-integration checkout whose historical default is full.
     kwargs = {
         "profiles": profiles,
         "indexes": indexes,
         "history": history,
         "length_mode": getattr(config, "discovery_length_mode", None),
+        "history_detail": "full",
     }
-    if "history_detail" in inspect.signature(build_variant_catalog).parameters:
-        kwargs["history_detail"] = "full"
     return build_variant_catalog(targets, config, **kwargs)
 
 
@@ -350,6 +349,19 @@ def _write_receipt_path(output: Path) -> None:
         receipt.write_text(
             json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n"
         )
+
+
+def _receipt_is_stable_success(record: dict[str, Any]) -> bool:
+    return bool(
+        record.get("status") == "success"
+        and record.get("exitStatus") == 0
+        and record.get("sourceChangedDuringRun") is False
+        and record.get("runtimeChangedDuringRun") is False
+        and all(
+            item.get("sourceChangedDuringRun") is False
+            for item in record.get("inputs", [])
+        )
+    )
 
 
 def _failure_receipt(
@@ -434,9 +446,8 @@ def diagnose_discovery(*, bundle, output, family_id=None, site_id=None, argv=Non
     """
     bundle = Path(bundle).resolve()
     output = Path(output).resolve()
-    argv = list(
-        argv
-        or [
+    if argv is None:
+        argv = [
             "primalscheme3",
             "panel-discovery-diagnose",
             "--bundle",
@@ -444,7 +455,12 @@ def diagnose_discovery(*, bundle, output, family_id=None, site_id=None, argv=Non
             "--output",
             str(output),
         ]
-    )
+        if family_id is not None:
+            argv.extend(("--family-id", family_id))
+        elif site_id is not None:
+            argv.extend(("--site-id", site_id))
+    else:
+        argv = list(argv)
     if output.exists():
         raise ValueError("diagnostic output already exists: " + str(output))
     if output == bundle or output.is_relative_to(bundle):
@@ -457,7 +473,6 @@ def diagnose_discovery(*, bundle, output, family_id=None, site_id=None, argv=Non
         provenance, optimizer, source_catalog, targets, source_inputs = (
             _source_preflight(bundle)
         )
-        source_inputs = source_inputs
         execution_start = capture_execution_identity(
             [item["path"] for item in source_inputs]
         )
@@ -479,11 +494,16 @@ def diagnose_discovery(*, bundle, output, family_id=None, site_id=None, argv=Non
         history = SQLiteCoverageHistory(
             output / _HISTORY, run_id="discovery-diagnostic"
         )
-        replay_catalog = _invoke_discovery(
-            target, config, profiles=profiles, indexes=indexes, history=history
-        )
-        history.checkpoint()
-        history.close()
+        try:
+            replay_catalog = _invoke_discovery(
+                target, config, profiles=profiles, indexes=indexes, history=history
+            )
+            history.checkpoint()
+            history_counts = {
+                name: len(getattr(history, name)) for name in history._streams
+            }
+        finally:
+            history.close()
         # Compare scientific membership only. Detailed evidence IDs and event
         # chronology are intentionally excluded from parity.
         if entity["kind"] == "family":
@@ -546,9 +566,7 @@ def diagnose_discovery(*, bundle, output, family_id=None, site_id=None, argv=Non
             "history": {
                 "path": _HISTORY,
                 "detail": "full",
-                "records": {
-                    name: len(getattr(history, name)) for name in history._streams
-                },
+                "records": history_counts,
             },
             "error": None
             if membership_match
@@ -569,7 +587,7 @@ def diagnose_discovery(*, bundle, output, family_id=None, site_id=None, argv=Non
                     "sourceIndex": item["sourceIndex"],
                 }
             )
-        finalize_provenance(
+        receipt = finalize_provenance(
             output_dir=output,
             argv=argv,
             resolved_options={
@@ -592,6 +610,23 @@ def diagnose_discovery(*, bundle, output, family_id=None, site_id=None, argv=Non
             },
             execution_start=execution_start,
         )
+        if not _receipt_is_stable_success(receipt) and membership_match:
+            report["valid"] = False
+            report["status"] = "failure"
+            report["scientific"]["membershipMatch"] = False
+            report["error"] = "source/runtime/input stability changed during replay"
+            _json_write(output / _REPORT, report)
+            stored_receipt = json.loads((output / "panel-provenance.json").read_text())
+            stored_receipt.update(
+                {
+                    "status": "failure",
+                    "exitStatus": 1,
+                    "stderr": report["error"],
+                }
+            )
+            (output / "panel-provenance.json").write_text(
+                json.dumps(stored_receipt, sort_keys=True, separators=(",", ":")) + "\n"
+            )
         _write_receipt_path(output)
         return report
     except BaseException as error:

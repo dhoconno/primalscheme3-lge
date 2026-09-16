@@ -59,5 +59,10 @@ Result: clean.
 
 The focused tests cover successful family and site anchor selection, exact-one
 entity validation, unknown IDs, source-byte preservation, scientific
-membership drift, builder failure, and failure provenance. End-to-end CLI
-wiring is intentionally left to the parent integration task.
+membership drift, builder failure, failure provenance, real source preflight
+and config reconstruction, tampered input/catalog rejection, missing
+source/runtime rejection, mandatory `history_detail="full"`, and an actual
+nonempty anchored discovery replay. End-to-end CLI wiring is intentionally
+left to the parent integration task.
+
+Follow-up validation result: `12 passed`.

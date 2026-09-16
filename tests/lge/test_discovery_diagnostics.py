@@ -2,17 +2,107 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import pytest
 
+from primalscheme3.core.config import Config
 from primalscheme3.panel.coverage_types import (
     CandidateFamily,
     OligoSite,
     Target,
     VariantCatalog,
 )
+
+
+def _real_source_bundle(tmp_path, module):
+    """Build the smallest descriptor-bound source panel for real preflight."""
+    from primalscheme3.core.mapping import create_mapping
+    from primalscheme3.core.msa import parse_msa
+    from primalscheme3.panel.coverage_discovery import (
+        build_variant_catalog,
+        variant_targets,
+    )
+    from primalscheme3.panel.coverage_history import CoverageHistory
+
+    bundle = tmp_path / "real-source"
+    stage = bundle / "stages/strict"
+    stage.mkdir(parents=True)
+    raw = bundle / "input.fa"
+    sequence = "CAACGGCGGACTTTATTGTATCTCC" * 4
+    raw.write_text(">reference\n" + sequence + "\n")
+    array, _ = parse_msa(raw)
+    mapping, _ = create_mapping(array)
+    target = variant_targets(
+        {0: SimpleNamespace(array=array, _mapping_array=mapping, msa_index=0)}
+    )[0]
+    config = Config(
+        selection_algorithm="allele-coverage",
+        amplicon_size=100,
+        amplicon_size_min=80,
+        amplicon_size_max=120,
+    )
+    source_catalog = build_variant_catalog(
+        (target,),
+        config,
+        indexes=([24], [76]),
+        history=CoverageHistory(None, run_id="source"),
+        history_detail="full",
+    )
+    with gzip.open(stage / "catalog.json.gz", "wt") as stream:
+        json.dump(
+            source_catalog.to_dict(), stream, sort_keys=True, separators=(",", ":")
+        )
+    with gzip.open(stage / "authoritative-targets.json.gz", "wt") as stream:
+        json.dump([asdict(target)], stream, sort_keys=True, separators=(",", ":"))
+    (bundle / "config.json").write_text(json.dumps(config.to_dict(), sort_keys=True))
+    optimizer = {
+        "schemaVersion": "primalscheme3.panel-optimizer/v2",
+        "primaryTier": "strict",
+        "stages": [{"stage_id": "strict", "path": "stages/strict"}],
+        "options": {
+            "candidate_profiles": "union",
+            "discovery_length_mode": "first-compatible",
+        },
+    }
+    (bundle / "panel-optimizer.json").write_text(json.dumps(optimizer, sort_keys=True))
+    descriptors = [
+        module._descriptor(path, bundle)
+        for path in sorted(bundle.rglob("*"))
+        if path.is_file()
+    ]
+    input_descriptor = next(item for item in descriptors if item["path"] == "input.fa")
+    source = module.source_identity()
+    runtime = module.runtime_identity()
+    provenance = {
+        "schemaVersion": "primalscheme3.panel-provenance/v1",
+        "status": "success",
+        "exitStatus": 0,
+        "source": source,
+        "sourceAtEnd": source,
+        "runtime": runtime,
+        "runtimeAtEnd": runtime,
+        "sourceChangedDuringRun": False,
+        "runtimeChangedDuringRun": False,
+        "inputs": [
+            {
+                **input_descriptor,
+                "sourcePath": str(raw.resolve()),
+                "sourceAtStartSha256": input_descriptor["sha256"],
+                "sourceAtStartSize": input_descriptor["size"],
+                "storedPath": "input.fa",
+                "sourceIndex": 0,
+            }
+        ],
+        "outputs": descriptors,
+    }
+    (bundle / "panel-provenance.json").write_text(
+        json.dumps(provenance, sort_keys=True)
+    )
+    return bundle, source_catalog, target, config
 
 
 def _fixture():
@@ -199,3 +289,64 @@ def test_membership_drift_and_builder_failure_are_failed_provenance(
     assert not report["valid"]
     receipt = json.loads((output / "provenance.json").read_text())
     assert "replay failed" in receipt["stderr"]
+
+
+def test_real_preflight_replay_and_config_binding(tmp_path):
+    import primalscheme3.panel.discovery_diagnostics as module
+
+    bundle, source_catalog, _, config = _real_source_bundle(tmp_path, module)
+    loaded_provenance, _, loaded_catalog, _, _ = module._source_preflight(bundle)
+    assert loaded_provenance["status"] == "success"
+    assert loaded_catalog.semantic_digest == source_catalog.semantic_digest
+    replay_config = module._config_from_bundle(bundle, {"options": {}})
+    assert replay_config.amplicon_size_min == config.amplicon_size_min
+    assert replay_config.amplicon_size_max == config.amplicon_size_max
+    family = source_catalog.families[0]
+    report = module.diagnose_discovery(
+        bundle=bundle, output=tmp_path / "real-replay", family_id=family.id
+    )
+    assert report["valid"], report
+    assert report["scope"]["allOriginalTargetRows"] is True
+    receipt = json.loads((tmp_path / "real-replay/provenance.json").read_text())
+    assert receipt["status"] == "success"
+    assert receipt["sourceChangedDuringRun"] is False
+    assert receipt["runtimeChangedDuringRun"] is False
+    assert all(item["sourceChangedDuringRun"] is False for item in receipt["inputs"])
+
+
+@pytest.mark.parametrize("tamper", ["input", "catalog", "runtime", "source"])
+def test_real_preflight_rejects_tampered_or_missing_bindings(tmp_path, tamper):
+    import primalscheme3.panel.discovery_diagnostics as module
+
+    bundle, _, _, _ = _real_source_bundle(tmp_path, module)
+    if tamper == "input":
+        (bundle / "input.fa").write_text(">reference\nACGT\n")
+    elif tamper == "catalog":
+        with gzip.open(bundle / "stages/strict/catalog.json.gz", "wt") as stream:
+            json.dump({"tampered": True}, stream)
+    else:
+        path = bundle / "panel-provenance.json"
+        provenance = json.loads(path.read_text())
+        provenance.pop("runtime" if tamper == "runtime" else "source")
+        path.write_text(json.dumps(provenance))
+    with pytest.raises(ValueError):
+        module._source_preflight(bundle)
+
+
+def test_replay_requires_new_history_detail_keyword(harness, monkeypatch):
+    module, _, catalog, _, _, _ = harness
+    calls = {}
+
+    def builder(targets, config, **kwargs):
+        calls.update(kwargs)
+        return catalog
+
+    monkeypatch.setattr(module, "build_variant_catalog", builder)
+    module._invoke_discovery(
+        (catalog.targets[0],),
+        SimpleNamespace(discovery_length_mode="first-compatible"),
+        profiles={"normal": SimpleNamespace()},
+        indexes=([20], []),
+        history=SimpleNamespace(),
+    )
+    assert calls["history_detail"] == "full"
