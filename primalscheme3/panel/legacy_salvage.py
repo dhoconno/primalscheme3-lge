@@ -320,7 +320,20 @@ def run_legacy_salvage(panel, msa_dict, options: LegacySalvageOptions | None = N
             candidates.append((legacy_candidate_id(item, msa), item, msa))
     candidates.sort(key=lambda item: item[0])
     strict_objects = {id(item) for item in panel.all_primerpairs()}
-    candidates = [item for item in candidates if id(item[1]) not in strict_objects]
+    strict_id_set = set(strict_ids)
+    retained_ids = set()
+    retained_candidates = []
+    for item in candidates:
+        candidate_id = item[0]
+        if id(item[1]) in strict_objects or candidate_id in strict_id_set:
+            continue
+        # Content-identical pairs can occur more than once in a generated
+        # pool.  A stable candidate ID represents one salvage opportunity.
+        if candidate_id in retained_ids:
+            continue
+        retained_ids.add(candidate_id)
+        retained_candidates.append(item)
+    candidates = retained_candidates
 
     def manifest_item(candidate_id, primer_pair, msa, *, status, pool=None):
         intervals = _valid_intervals(
@@ -551,17 +564,23 @@ def validate_legacy_salvage(
     """
     violations: list[str] = []
     run.options.validate_for_strict_cutoff(float(strict_cutoff))
+    if tuple(stage.cutoff for stage in run.stages) != tuple(run.options.thresholds):
+        violations.append("salvage stage cutoff sequence changed")
     all_pairs = list(panel.all_primerpairs())
+    final_counts = Counter(
+        legacy_candidate_id(item, msa_dict[item.msa_index]) for item in all_pairs
+    )
     pair_ids = {
         legacy_candidate_id(item, msa_dict[item.msa_index]): item for item in all_pairs
     }
     accepted_ids = [candidate_id for stage in run.stages for candidate_id in stage.accepted]
-    expected_ids = set(run.strict_candidate_ids) | set(accepted_ids)
     if not set(run.strict_candidate_ids).issubset(pair_ids):
         violations.append("strict candidate was removed")
     if not set(accepted_ids).issubset(pair_ids):
         violations.append("accepted salvage candidate is missing")
-    if len(pair_ids) != len(expected_ids):
+    expected_counts = Counter(run.strict_candidate_ids)
+    expected_counts.update(accepted_ids)
+    if final_counts != expected_counts:
         violations.append("final panel contains an unrecorded candidate")
 
     strict_ids = set(run.strict_candidate_ids)
@@ -593,6 +612,9 @@ def validate_legacy_salvage(
                 expected_strict_by_pool[pool][candidate_id] += 1
     if actual_strict_by_pool != expected_strict_by_pool:
         violations.append("strict pool assignments changed")
+    strict_snapshot = _coverage(SimplePanelView(pools), msa_dict)
+    if strict_snapshot != run.strict_coverage:
+        violations.append("strict coverage snapshot changed")
 
     edge_keys = [set() for _ in range(panel.n_pools)]
     species = [set() for _ in range(panel.n_pools)]

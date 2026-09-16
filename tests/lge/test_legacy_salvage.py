@@ -192,6 +192,11 @@ def test_fresh_validation_replays_strict_assignment_and_salvage():
     panel._pools[1].append(incumbent)
     assert not validate_legacy_salvage(panel, {0: target}, run)["valid"]
 
+    panel._pools[1].remove(incumbent)
+    panel._pools[0].append(incumbent)
+    panel._pools[0].append(rescued)
+    assert not validate_legacy_salvage(panel, {0: target}, run)["valid"]
+
 
 def test_salvage_thresholds_use_configured_strict_cutoff():
     options = LegacySalvageOptions(mode="bounded", thresholds=(-30, -32), floor=-32)
