@@ -25,6 +25,10 @@ from primalscheme3.interaction.interaction import (
     visualise_interactions,
 )
 from primalscheme3.panel.coverage_provenance import capabilities_document
+from primalscheme3.panel.legacy_salvage_cli import (
+    LEGACY_SALVAGE_OPTION_NAMES,
+    resolve_legacy_salvage_options,
+)
 from primalscheme3.panel.panel_main import PanelRunModes, panelcreate
 from primalscheme3.repair.repair import repair
 from primalscheme3.replace.replace import ReplaceRunModes, replace
@@ -771,6 +775,41 @@ def panel_create(
             rich_help_panel="Allele salvage",
         ),
     ] = None,
+    legacy_salvage: Annotated[
+        str | None,
+        typer.Option(
+            help="Legacy-only dimer salvage: off or bounded; default off",
+            rich_help_panel="Legacy salvage",
+        ),
+    ] = None,
+    legacy_salvage_thresholds: Annotated[
+        list[float] | None,
+        typer.Option(
+            "--legacy-salvage-threshold",
+            help="Repeat a finite decreasing legacy salvage cutoff; default -28, -30, -32",
+            rich_help_panel="Legacy salvage",
+        ),
+    ] = None,
+    legacy_salvage_floor: Annotated[
+        float | None,
+        typer.Option(help="Legacy salvage hard floor; default -32", rich_help_panel="Legacy salvage"),
+    ] = None,
+    legacy_salvage_max_edges_per_pool: Annotated[
+        int | None,
+        typer.Option(help="Cumulative relaxed conflict edges per pool; default 8", min=0, rich_help_panel="Legacy salvage"),
+    ] = None,
+    legacy_salvage_max_incident_species_per_pool: Annotated[
+        int | None,
+        typer.Option(help="Cumulative incident oligo species per pool; default 4", min=0, rich_help_panel="Legacy salvage"),
+    ] = None,
+    legacy_salvage_min_reference_gain: Annotated[
+        int | None,
+        typer.Option(help="Minimum new trimmed reference bases per addition; default 1", min=1, rich_help_panel="Legacy salvage"),
+    ] = None,
+    legacy_salvage_max_candidate_evaluations: Annotated[
+        int | None,
+        typer.Option(help="Cumulative candidate evaluations per pass; default 10000", min=1, rich_help_panel="Legacy salvage"),
+    ] = None,
 ):
     """
     Creates a primer panel
@@ -878,6 +917,28 @@ def panel_create(
                     "coverage selection does not support --max-amplicons-region-group"
                 )
         params.pop("mispriming_product_size", None)
+    try:
+        legacy_salvage_options = resolve_legacy_salvage_options(
+            selection_algorithm=selection_algorithm,
+            mode=params.get("mode", mode),
+            mapping=mapping,
+            region_bedfile=region_bedfile,
+            input_bedfile=input_bedfile,
+            config_input_bedfile=None,
+            strict_cutoff=dimer_score,
+            explicit=explicit & LEGACY_SALVAGE_OPTION_NAMES,
+            legacy_salvage=legacy_salvage,
+            legacy_salvage_thresholds=legacy_salvage_thresholds,
+            legacy_salvage_floor=legacy_salvage_floor,
+            legacy_salvage_max_edges_per_pool=legacy_salvage_max_edges_per_pool,
+            legacy_salvage_max_incident_species_per_pool=legacy_salvage_max_incident_species_per_pool,
+            legacy_salvage_min_reference_gain=legacy_salvage_min_reference_gain,
+            legacy_salvage_max_candidate_evaluations=legacy_salvage_max_candidate_evaluations,
+        )
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    for name in LEGACY_SALVAGE_OPTION_NAMES:
+        params.pop(name, None)
     config = create_config_with_amplicon_bounds(params)
     mode = PanelRunModes(params["mode"])
 
@@ -901,6 +962,7 @@ def panel_create(
         force=force,
         offline_plots=offline_plots,
         executed_argv=list(sys.argv),
+        legacy_salvage_options=legacy_salvage_options,
     )
 
 

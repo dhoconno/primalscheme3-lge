@@ -71,7 +71,18 @@ $ primalscheme3 panel-create [OPTIONS]
 * `--high-gc / --no-high-gc`: Use high GC primers  [default: no-high-gc]
 * `--offline-plots / --no-offline-plots`: Includes 3Mb of dependencies into the plots, so they can be viewed offline  [default: offline-plots]
 * `--use-matchdb / --no-use-matchdb`: Create and use a mispriming database  [default: use-matchdb]
+* `--legacy-salvage [off|bounded]`: Opt-in bounded salvage over the retained legacy candidate pool
+* `--legacy-salvage-threshold FLOAT`: Repeatable relaxed cutoff; defaults to `-28`, `-30`, `-32`
+* `--legacy-salvage-floor FLOAT`: Screening floor; default `-32`
+* `--legacy-salvage-max-edges-per-pool INTEGER`: Cumulative relaxed conflict edge budget; default `8`
+* `--legacy-salvage-max-incident-species-per-pool INTEGER`: Cumulative incident oligo budget; default `4`
+* `--legacy-salvage-min-reference-gain INTEGER`: Minimum new trimmed reference bases; default `1`
+* `--legacy-salvage-max-candidate-evaluations INTEGER`: Candidate evaluation cap per pass; default `10000`
 * `--help`: Show this message and exit.
+
+Legacy salvage is available only with `--selection-algorithm legacy --mode equal --mapping first`, without region or imported-primer inputs. It generates the ordinary legacy candidate pool and strict panel first, then considers retained candidates in sequential relaxed dimer passes. Legacy overlap, MatchDB/product, geometry, amplicon-count and input checks remain active; only inter-candidate same-pool dimer admission changes.
+
+The strict cutoff is the configured `--dimer-score` (normally `-26`). Thresholds must be finite, strictly decreasing, below that cutoff, and no lower than the floor. Edge and incident-oligo budgets are cumulative across passes and count distinct sequence interactions, including incumbents. A candidate must add positive post-trim coverage after unioning half-open reference intervals; overlapping bases do not count twice. The floor is a screening heuristic, not a PCR performance guarantee. Outputs retain strict results as the baseline and write salvage candidate/stage audit data with resolved options and provenance.
 
 ## `primalscheme3 repair-mode`
 
@@ -187,4 +198,3 @@ $ primalscheme3 visualise-primer-mismatches [OPTIONS] MSA BEDFILE
 * `--include-seqs / --no-include-seqs`: Reduces plot filesize, by excluding primer sequences  [default: include-seqs]
 * `--offline-plots / --no-offline-plots`: Includes 3Mb of dependencies into the plots, so they can be viewed offline  [default: offline-plots]
 * `--help`: Show this message and exit.
-
