@@ -135,6 +135,7 @@ def run_allele_pipeline(
                 targets=variant_targets(msa_dict),
                 config=config,
                 profiles=profiles,
+                history_detail=options.discovery_history,
             )
             materialize_cache_reuse(reuse, output_dir, history=history)
             catalog = reuse.catalog
@@ -156,6 +157,7 @@ def run_allele_pipeline(
                 profiles=profiles,
                 history=history,
                 length_mode=options.discovery_length_mode,
+                history_detail=options.discovery_history,
             )
             config_dict["discovery_reused"] = False
         timings["discovery_seconds"] = monotonic() - start
@@ -369,6 +371,12 @@ def run_allele_pipeline(
                 "path": "history/history.sqlite",
                 "counts": history_counts,
                 "configurationLedger": "configuration-ledger.json.gz",
+                "detail": options.discovery_history,
+                "scope": (
+                    "compact-target-profile-summaries"
+                    if options.discovery_history == "compact"
+                    else "full-attempt-origin-records"
+                ),
             },
             "publication": {
                 "targetToReference": references,

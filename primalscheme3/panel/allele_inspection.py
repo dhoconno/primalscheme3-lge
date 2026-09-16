@@ -378,6 +378,30 @@ def _query_history(
         snapshot_dispositions=disposition_views,
     )
     output["discovery_conditions"] = list(discovery_condition_rows(output))
+    history_detail = optimizer.get("history", {}).get("detail")
+    history_scope = optimizer.get("history", {}).get("scope")
+    if history_detail is None:
+        try:
+            catalog_payload = _read(_catalog_path(bundle, optimizer))
+            resolved = json.loads(catalog_payload.get("resolved_config_json", "{}"))
+        except (AttributeError, KeyError, TypeError, ValueError, OSError):
+            resolved = {}
+        history_detail = resolved.get("history_detail", "full")
+        history_scope = resolved.get(
+            "history_scope",
+            "compact-target-profile-summaries"
+            if history_detail == "compact"
+            else "full-attempt-origin-records",
+        )
+    output["scope"].update(
+        history_detail=history_detail,
+        history_scope=history_scope,
+        completeness_applies_to=(
+            "recorded compact summary entities"
+            if history_detail == "compact"
+            else "all recorded discovery entities"
+        ),
+    )
     return output
 
 
@@ -445,6 +469,12 @@ def query_allele_history(
                 "path": str(paths["historyPath"].relative_to(bundle)),
                 "configurationLedger": str(
                     paths["originLedgerPath"].relative_to(bundle)
+                ),
+                "detail": manifest.get("discoveryHistoryDetail", "full"),
+                "scope": (
+                    "compact-target-profile-summaries"
+                    if manifest.get("discoveryHistoryDetail", "full") == "compact"
+                    else "full-attempt-origin-records"
                 ),
             },
             "catalogPath": str(paths["catalogPath"].relative_to(bundle)),

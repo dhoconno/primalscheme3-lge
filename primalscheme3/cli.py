@@ -616,6 +616,13 @@ def panel_create(
             rich_help_panel="Allele compute",
         ),
     ] = None,
+    discovery_history: Annotated[
+        str | None,
+        typer.Option(
+            help="Discovery history detail: compact (default) or full advanced diagnostics",
+            rich_help_panel="Allele compute",
+        ),
+    ] = None,
     specificity_terminal_k: Annotated[
         int | None,
         typer.Option(
@@ -1136,6 +1143,28 @@ def panel_history(
     )
     typer.echo(str(output / "query.json"))
     if not result["valid"]:
+        raise typer.Exit(1)
+
+
+@app.command("panel-discovery-diagnose")
+def panel_discovery_diagnose(
+    bundle: Annotated[pathlib.Path, typer.Option(help="Source allele panel bundle")],
+    output: Annotated[pathlib.Path, typer.Option(help="New replay result directory outside the bundle")],
+    family_id: Annotated[str | None, typer.Option(help="Candidate family ID to replay")]=None,
+    site_id: Annotated[str | None, typer.Option(help="Concrete site ID to replay")]=None,
+):
+    """Reconstruct detailed discovery at one stored site or family anchor."""
+    from primalscheme3.panel.discovery_diagnostics import diagnose_discovery
+
+    result = diagnose_discovery(
+        bundle=bundle,
+        output=output,
+        family_id=family_id,
+        site_id=site_id,
+        argv=list(sys.argv),
+    )
+    typer.echo(str(output / "discovery-diagnostic.json"))
+    if not result.get("valid", False):
         raise typer.Exit(1)
 
 

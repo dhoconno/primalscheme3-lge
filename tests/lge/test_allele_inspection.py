@@ -109,6 +109,18 @@ def test_query_failure_writes_receipt_and_does_not_mutate_bundle(tmp_path):
     assert database.read_bytes() == before
 
 
+def test_history_inspection_discloses_compact_recorded_scope(tmp_path):
+    bundle = history_bundle(tmp_path / "bundle")
+    optimizer = json.loads((bundle / "panel-optimizer.json").read_text())
+    optimizer["history"].update(
+        detail="compact", scope="compact-target-profile-summaries"
+    )
+    (bundle / "panel-optimizer.json").write_text(json.dumps(optimizer))
+    report = api().query_allele_history(bundle, entity="site", stage="salvage-1")
+    assert report["scope"]["history_detail"] == "compact"
+    assert report["scope"]["completeness_applies_to"] == "recorded compact summary entities"
+
+
 @pytest.fixture
 def bundle(tmp_path):
     from primalscheme3.core.config import Config

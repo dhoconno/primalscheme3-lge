@@ -36,11 +36,25 @@ def test_programmatic_preset_resolves_and_roundtrips_exact_types():
     assert resolved.preset == "allele-balanced-v1"
     assert resolved.variant_selection == "subsets"
     assert resolved.candidate_profiles == "union"
+    assert resolved.discovery_history == "compact"
     assert resolved.salvage == "off" and resolved.primary_tier == "strict"
     assert resolved.salvage_thresholds == (-28.0, -30.0, -32.0)
     assert Config(**config.to_dict()).to_dict() == config.to_dict()
     assert resolved.to_dict()["requested_options"]["amplicon_size_min"] == 150
     assert "coverage_target" not in resolved.to_dict()["requested_options"]
+
+
+def test_discovery_history_defaults_compact_and_full_is_explicit():
+    compact = Config(**kwargs())
+    full = Config(**kwargs(discovery_history="full"))
+    assert options().from_config(compact).discovery_history == "compact"
+    assert options().from_config(full).discovery_history == "full"
+
+
+def test_cli_discovery_history_override_is_forwarded(tmp_path):
+    result, run = invoke(tmp_path, ("--discovery-history", "full"))
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    assert options().from_config(run.call_args.kwargs["config"]).discovery_history == "full"
 
 
 def test_programmatic_overrides_and_search_mapping():
@@ -147,6 +161,7 @@ def test_cli_default_sources_do_not_override_new_preset(tmp_path):
         config.coverage_target == 0.95
         and config.terminal_gap_policy.value == "observed-only"
     )
+    assert options().from_config(config).discovery_history == "compact"
     assert run.call_args.kwargs["mode"].value == "equal"
     assert "coverage_target" not in resolved.to_dict()["requested_options"]
     result, run = invoke(

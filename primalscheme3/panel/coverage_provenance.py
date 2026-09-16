@@ -193,6 +193,19 @@ def capabilities_document() -> dict[str, Any]:
             "metric": "observed-allele-primer-trimmed/v1",
             "preset": "allele-balanced-v1",
             "catalogSchemaVersion": "primalscheme3.variant-catalog/v2",
+            "discoveryHistory": {
+                "default": "compact",
+                "policies": {
+                    "compact": {
+                        "id": "compact/v1",
+                        "scope": "target-profile summaries and enumeration boundaries",
+                    },
+                    "full": {
+                        "id": "full/v1",
+                        "scope": "per-attempt origins and assessments",
+                    },
+                },
+            },
             "configurationLedgerSchemaVersion": "primalscheme3.configuration-ledger/v2",
             "validationSchemaVersion": "primalscheme3.allele-panel-validation/v2",
             "profile": {

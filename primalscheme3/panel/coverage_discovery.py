@@ -129,7 +129,8 @@ def _group_variant_records(records, target, row_content_digests):
         yield group
 
 
-def build_variant_catalog(targets, config, *, profiles=None, indexes=None, history=None, length_mode=None):
+def build_variant_catalog(targets, config, *, profiles=None, indexes=None, history=None,
+                          length_mode=None, history_detail='full'):
     """Build diagnostic and selectable sites, then feasible hybrid anchor families.
 
     `targets` are authoritative Target records or an input-ordered MSA dictionary.
@@ -140,6 +141,8 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
     length_mode = length_mode or getattr(config, 'discovery_length_mode', 'first-compatible')
     if length_mode not in ('first-compatible', 'all'):
         raise ValueError('discovery length mode must be first-compatible or all')
+    if history_detail not in ('compact', 'full'):
+        raise ValueError('history detail must be compact or full')
     if history is None:
         from primalscheme3.panel.coverage_history import CoverageHistory
         history = CoverageHistory(None, run_id='discovery')
@@ -160,6 +163,9 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                 'ambiguous_expansion_limit': 256,
                 'amplicon_size_min': config.amplicon_size_min,
                 'amplicon_size_max': config.amplicon_size_max,
+                'history_detail': history_detail,
+                'history_scope': ('compact-target-profile-summaries'
+                                  if history_detail == 'compact' else 'full-attempt-origin-records'),
                 'indexes': indexes}
     config.discovery_workers_by_target_profile = {}
     config.discovery_workers_by_msa = {}
@@ -194,6 +200,60 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
             history.emit(stage_id=stage, kind='discovery-execution', entity_ids=(target.id,),
                          changes={'profile_id': profile_id, 'source_msa_index': target.source_msa_index,
                                   'requested_workers': profile.ncores, 'actual_workers': workers})
+            if history_detail == 'compact':
+                # Compact mode consumes raw discovery records directly.  It keeps
+                # every concrete mapped site and profile membership, while
+                # avoiding row-origin payloads, intrinsic evidence and per-site
+                # assessments/events entirely.
+                counts = Counter()
+                failures = Counter()
+                for record in records:
+                    counts['raw_attempt_count'] += 1
+                    sequence = record['sequence']
+                    if not sequence:
+                        counts['nonsequence_attempt_count'] += 1
+                        failures[record['reason'] or 'unknown'] += 1
+                        continue
+                    counts['concrete_attempt_count'] += 1
+                    site = _mapped_site(target, record)
+                    if site is None:
+                        counts['unmapped_attempt_count'] += 1
+                        failures[record['reason'] or 'unmapped'] += 1
+                        continue
+                    previous = sites.get(site.id)
+                    if site.mapping_failure is not None:
+                        counts['mapped_failure_count'] += 1
+                    chemistry_accepted = bool(record['accepted'])
+                    accepted = chemistry_accepted and site.reference_footprint is not None
+                    if accepted:
+                        counts['accepted_concrete_attempt_count'] += 1
+                    else:
+                        counts['rejected_concrete_attempt_count'] += 1
+                        reason = site.mapping_failure or record['reason']
+                        failures[reason if reason and reason != 'pass' else 'rejected'] += 1
+                    sites[site.id] = replace(
+                        site,
+                        # Match full mode: accepting membership records chemistry
+                        # acceptance even when reference mapping later rejects the
+                        # concrete site from family selection.
+                        accepting_profile_ids=((profile_id,) if chemistry_accepted else ())
+                        + (previous.accepting_profile_ids if previous else ()),
+                        generated_profile_ids=(profile_id,)
+                        + (previous.generated_profile_ids if previous else ()),
+                        intrinsic_evidence_ids=(),
+                    )
+                history.emit(
+                    stage_id=stage,
+                    kind='compact-discovery-summary',
+                    entity_ids=(target.id,),
+                    changes={
+                        'profile_id': profile_id,
+                        'history_detail': history_detail,
+                        **dict(counts),
+                        'failed_attempts_by_reason': dict(sorted(failures.items())),
+                    },
+                )
+                continue
             for group in _group_variant_records(records, target, row_content_digests):
                 record = group['common']
                 site = _mapped_site(target, record) if record['sequence'] else None
@@ -266,6 +326,9 @@ def build_variant_catalog(targets, config, *, profiles=None, indexes=None, histo
                 family = CandidateFamily(target.id, (fa, ra), tuple(s.id for s in fs), tuple(s.id for s in rs),
                     tuple((fp, rp) for fp in sorted({p for f in fs for p in f.accepting_profile_ids})
                           for rp in sorted({p for r in rs for p in r.accepting_profile_ids})))
+                if history_detail == 'compact':
+                    families.append(family)
+                    continue
                 generated = history.emit(stage_id=stage, kind='generated-family', entity_ids=(family.id,), changes={})
                 evidence = history.record_evidence(entity_ids=(family.id,), measurement='family-geometry-existence',
                     dependency_key={'sites': sorted((s.id, s.reference_footprint) for s in fs+rs),

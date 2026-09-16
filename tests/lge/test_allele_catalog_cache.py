@@ -35,7 +35,7 @@ def replace_manifest_receipts(cache, manifest):
     receipt_path.write_text(canonical_json(receipt))
 
 
-def fixture_panel(path, format_version=2):
+def fixture_panel(path, format_version=2, history_detail="full"):
     from time import monotonic
 
     from primalscheme3.panel.coverage_provenance import (
@@ -60,11 +60,14 @@ def fixture_panel(path, format_version=2):
         amplicon_size=60,
         amplicon_size_min=45,
         amplicon_size_max=75,
+        discovery_history=history_detail,
     )
     start = capture_execution_identity([raw])
     started = monotonic()
     history = SQLiteCoverageHistory(path / "history", run_id="fixture", format_version=format_version)
-    catalog = build_variant_catalog(targets, config, history=history)
+    catalog = build_variant_catalog(
+        targets, config, history=history, history_detail=history_detail
+    )
     history.close()
     with gzip.open(path / "stages/strict/catalog.json.gz", "wt") as f:
         f.write(canonical_json(catalog.to_dict()))
@@ -154,6 +157,59 @@ def test_union_cache_projection_exactly_matches_fresh_profile_discovery(tmp_path
         load_discovery_cache(cache, targets=targets, config=changed).catalog.to_dict()
         == union.to_dict()
     )
+
+
+def test_compact_cache_projects_membership_without_reading_sqlite_history(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from primalscheme3.panel.allele_catalog_cache import (
+        export_panel_discovery_cache,
+        load_discovery_cache,
+    )
+
+    targets, config, _ = fixture_panel(tmp_path / "compact-panel", history_detail="compact")
+    cache = tmp_path / "compact-cache"
+    export_panel_discovery_cache(tmp_path / "compact-panel", cache, argv=["export-cache"])
+    manifest = json.loads((cache / "manifest.json").read_text())
+    assert manifest["discoveryHistoryDetail"] == "compact"
+    assert manifest["discoveryHistoryScope"] == "compact-target-profile-summaries"
+    profiles = {"normal": discovery_profiles(config)["normal"]}
+    import primalscheme3.panel.allele_catalog_cache as cache_api
+
+    calls = []
+    original_connection = cache_api._connection
+
+    @contextmanager
+    def observe_connection(path):
+        calls.append(path)
+        with original_connection(path) as db:
+            yield db
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(cache_api, "_connection", observe_connection)
+        reuse = load_discovery_cache(
+            cache,
+            targets=targets,
+            config=config,
+            profiles=profiles,
+            history_detail="compact",
+        )
+    assert len(calls) == 1  # snapshot integrity only; profile projection did not query SQLite
+    fresh = build_variant_catalog(
+        targets,
+        config,
+        profiles=profiles,
+        history_detail="compact",
+    )
+    assert reuse.catalog.to_dict() == fresh.to_dict()
+    with pytest.raises(ValueError, match="history detail"):
+        load_discovery_cache(
+            cache,
+            targets=targets,
+            config=config,
+            profiles=profiles,
+            history_detail="full",
+        )
 
 
 def test_cache_rejects_scientific_mismatch_corruption_and_incomplete_source(tmp_path):

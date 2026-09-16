@@ -65,6 +65,7 @@ NEW_OPTION_NAMES = frozenset(
         "phase_scheduling",
         "allele_weighting",
         "discovery_length_mode",
+        "discovery_history",
         "specificity_terminal_k",
         "secondary_product_policy",
         "intended_product_policy",
@@ -105,6 +106,7 @@ class AlleleOptions:
     variant_selection: str = "subsets"
     allele_weighting: str = "distinct-observed"
     discovery_length_mode: str = "first-compatible"
+    discovery_history: str = "compact"
     coverage_metric: str = "observed-allele-primer-trimmed"
     coverage_target: float = 0.95
     amplicon_size: int = 400
@@ -159,6 +161,7 @@ class AlleleOptions:
             "phase_scheduling": ("serial", "reserved"),
             "allele_weighting": ("distinct-observed",),
             "discovery_length_mode": ("first-compatible", "all"),
+            "discovery_history": ("compact", "full"),
             "coverage_metric": ("observed-allele-primer-trimmed",),
             "salvage": ("off", "bounded"),
             "intended_product_policy": ("exact-supported", "concrete-designated-sites"),

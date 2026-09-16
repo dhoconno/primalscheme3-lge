@@ -52,10 +52,14 @@ _DISCOVERY_FILES = tuple(
 )
 
 
-def discovery_settings(config, profiles, *, indexes=None, length_mode=None):
+def discovery_settings(config, profiles, *, indexes=None, length_mode=None,
+                       history_detail=None):
     length_mode = length_mode or getattr(
         config, "discovery_length_mode", "first-compatible"
     )
+    history_detail = history_detail or getattr(config, "discovery_history", "compact")
+    if history_detail not in ("compact", "full"):
+        raise ValueError("history detail must be compact or full")
     return {
         "profiles": {
             name: {k: getattr(p, k) for k in _FIELDS}
@@ -75,6 +79,12 @@ def discovery_settings(config, profiles, *, indexes=None, length_mode=None):
         "ambiguous_expansion_limit": 256,
         "amplicon_size_min": config.amplicon_size_min,
         "amplicon_size_max": config.amplicon_size_max,
+        "history_detail": history_detail,
+        "history_scope": (
+            "compact-target-profile-summaries"
+            if history_detail == "compact"
+            else "full-attempt-origin-records"
+        ),
         "indexes": indexes,
     }
 
@@ -275,7 +285,15 @@ def _export_panel_discovery_cache(
             "catalogPath": "catalog.json.gz",
             "historyPath": "history/history.sqlite",
             "originLedgerPath": "configuration-ledger.json.gz",
-            "historyRole": "immutable-origin-history-including-prior-selection; not-current-decisions",
+            "historyRole": (
+                "immutable-origin-history-including-prior-selection; not-current-decisions"
+                if json.loads(catalog.resolved_config_json).get("history_detail", "full") == "full"
+                else "immutable-compact-discovery-and-prior-selection; not-current-decisions"
+            ),
+            "discoveryHistoryDetail": json.loads(catalog.resolved_config_json).get("history_detail", "full"),
+            "discoveryHistoryScope": json.loads(catalog.resolved_config_json).get(
+                "history_scope", "full-attempt-origin-records"
+            ),
             "sourcePanelProvenance": "provenance.json",
             "exportProvenancePath": "cache-export-provenance.json",
             "inputs": inputs,
@@ -452,43 +470,18 @@ def export_panel_discovery_cache(panel_dir, cache_dir, *, argv):
 
 def _project(catalog, names, database):
     resolved = json.loads(catalog.resolved_config_json)
+    detail = resolved.get("history_detail", "full")
+    if detail not in ("compact", "full"):
+        raise ValueError("unsupported discovery history detail: " + str(detail))
     if names == set(resolved["profiles"]):
         return catalog, ()
     sites = []
-    with _connection(database) as db:
-
-        @lru_cache(maxsize=4096)
-        def belongs(identity):
-            # Indexed assessment/evidence links supply profile membership without
-            # decoding or replaying potentially millions of row-origin payloads.
-            if (
-                db.execute(
-                    "SELECT 1 FROM records WHERE stream='evidence' AND id=?",
-                    (identity,),
-                ).fetchone()
-                is None
-            ):
-                raise ValueError("catalog evidence missing from origin history")
-            return (
-                db.execute(
-                    "SELECT 1 FROM record_links l JOIN records r ON r.id=l.source_id "
-                    "WHERE l.kind='evidence' AND l.target_id=? AND r.stream='assessments' "
-                    "AND r.stage_id='discovery' AND r.profile_id IN ("
-                    + ",".join("?" for _ in names)
-                    + ") LIMIT 1",
-                    (identity, *sorted(names)),
-                ).fetchone()
-                is not None
-            )
-
+    if detail == "compact":
+        # Compact origins intentionally have no per-site evidence to project.
+        # Membership is already part of each immutable catalog site.
         for site in catalog.sites:
             if not names.intersection(site.generated_profile_ids):
                 continue
-            evidence_ids = [
-                identity
-                for identity in site.intrinsic_evidence_ids
-                if belongs(identity)
-            ]
             sites.append(
                 replace(
                     site,
@@ -498,9 +491,56 @@ def _project(catalog, names, database):
                     accepting_profile_ids=tuple(
                         names.intersection(site.accepting_profile_ids)
                     ),
-                    intrinsic_evidence_ids=tuple(evidence_ids),
+                    intrinsic_evidence_ids=(),
                 )
             )
+    else:
+        with _connection(database) as db:
+
+            @lru_cache(maxsize=4096)
+            def belongs(identity):
+                # Indexed assessment/evidence links supply profile membership
+                # without decoding or replaying row-origin payloads.
+                if (
+                    db.execute(
+                        "SELECT 1 FROM records WHERE stream='evidence' AND id=?",
+                        (identity,),
+                    ).fetchone()
+                    is None
+                ):
+                    raise ValueError("catalog evidence missing from origin history")
+                return (
+                    db.execute(
+                        "SELECT 1 FROM record_links l JOIN records r ON r.id=l.source_id "
+                        "WHERE l.kind='evidence' AND l.target_id=? AND r.stream='assessments' "
+                        "AND r.stage_id='discovery' AND r.profile_id IN ("
+                        + ",".join("?" for _ in names)
+                        + ") LIMIT 1",
+                        (identity, *sorted(names)),
+                    ).fetchone()
+                    is not None
+                )
+
+            for site in catalog.sites:
+                if not names.intersection(site.generated_profile_ids):
+                    continue
+                evidence_ids = [
+                    identity
+                    for identity in site.intrinsic_evidence_ids
+                    if belongs(identity)
+                ]
+                sites.append(
+                    replace(
+                        site,
+                        generated_profile_ids=tuple(
+                            names.intersection(site.generated_profile_ids)
+                        ),
+                        accepting_profile_ids=tuple(
+                            names.intersection(site.accepting_profile_ids)
+                        ),
+                        intrinsic_evidence_ids=tuple(evidence_ids),
+                    )
+                )
     families, derived_evidence = [], []
     for target in catalog.targets:
         forward, reverse = defaultdict(list), defaultdict(list)
@@ -542,23 +582,26 @@ def _project(catalog, names, database):
                         )
                     ),
                 )
-                evidence = IntrinsicEvidence(
-                    (family.id,),
-                    "family-geometry-existence",
-                    {
-                        "sites": sorted((s.id, s.reference_footprint) for s in fs + rs),
-                        "minimum": resolved["amplicon_size_min"],
-                        "maximum": resolved["amplicon_size_max"],
-                    },
-                    {"some_selection_feasible": True},
-                    "evaluated",
-                )
-                families.append(replace(family, geometry_evidence_ids=(evidence.id,)))
-                if (
-                    evidence.id
-                    not in catalog.family_by_id[family.id].geometry_evidence_ids
-                ):
-                    derived_evidence.append(evidence)
+                if detail == "compact":
+                    families.append(family)
+                else:
+                    evidence = IntrinsicEvidence(
+                        (family.id,),
+                        "family-geometry-existence",
+                        {
+                            "sites": sorted((s.id, s.reference_footprint) for s in fs + rs),
+                            "minimum": resolved["amplicon_size_min"],
+                            "maximum": resolved["amplicon_size_max"],
+                        },
+                        {"some_selection_feasible": True},
+                        "evaluated",
+                    )
+                    families.append(replace(family, geometry_evidence_ids=(evidence.id,)))
+                    if (
+                        evidence.id
+                        not in catalog.family_by_id[family.id].geometry_evidence_ids
+                    ):
+                        derived_evidence.append(evidence)
     for key in ("profiles", "minimum_frequency", "maximum_alignment_walk"):
         resolved[key] = {
             name: value for name, value in resolved[key].items() if name in names
@@ -571,7 +614,8 @@ def _project(catalog, names, database):
     ), tuple(derived_evidence)
 
 
-def load_discovery_cache(cache_dir, *, targets, config, profiles=None, indexes=None):
+def load_discovery_cache(cache_dir, *, targets, config, profiles=None, indexes=None,
+                         history_detail=None):
     cache_dir = Path(cache_dir).resolve()
     manifest = _read(cache_dir / "manifest.json")
     if manifest.get("schemaVersion") != SCHEMA:
@@ -645,6 +689,28 @@ def load_discovery_cache(cache_dir, *, targets, config, profiles=None, indexes=N
     )
     if catalog.semantic_digest != manifest["catalogSemanticDigest"]:
         raise ValueError("catalog semantic digest mismatch")
+    catalog_config = json.loads(catalog.resolved_config_json)
+    catalog_detail = catalog_config.get("history_detail", "full")
+    manifest_detail = manifest.get("discoveryHistoryDetail")
+    if manifest_detail is None:
+        if "history_detail" in catalog_config:
+            raise ValueError("cache missing declared discovery history detail")
+        manifest_detail = "full"
+    if manifest_detail != catalog_detail:
+        raise ValueError("cache discovery history detail disagrees with catalog")
+    manifest_scope = manifest.get("discoveryHistoryScope")
+    catalog_scope = catalog_config.get(
+        "history_scope",
+        "compact-target-profile-summaries"
+        if catalog_detail == "compact"
+        else "full-attempt-origin-records",
+    )
+    if manifest_scope is None:
+        if "history_scope" in catalog_config:
+            raise ValueError("cache missing declared discovery history scope")
+        manifest_scope = catalog_scope
+    if manifest_scope != catalog_scope:
+        raise ValueError("cache discovery history scope disagrees with catalog")
     if isinstance(targets, dict):
         targets = variant_targets(targets)
     if _target_signature(targets) != _target_signature(
@@ -658,8 +724,18 @@ def load_discovery_cache(cache_dir, *, targets, config, profiles=None, indexes=N
         choice = getattr(config, "candidate_profiles", "union")
         if choice != "union":
             profiles = {choice: profiles[choice]}
-    requested = discovery_settings(config, profiles, indexes=indexes)
-    available = json.loads(catalog.resolved_config_json)
+    available = catalog_config
+    available.setdefault("history_detail", "full")
+    available.setdefault(
+        "history_scope",
+        "full-attempt-origin-records",
+    )
+    requested = discovery_settings(
+        config,
+        profiles,
+        indexes=indexes,
+        history_detail=(available["history_detail"] if history_detail is None else history_detail),
+    )
     names = set(profiles)
     if not names or not names <= set(available["profiles"]):
         raise ValueError("requested discovery profiles not available")
@@ -668,6 +744,13 @@ def load_discovery_cache(cache_dir, *, targets, config, profiles=None, indexes=N
             name: value for name, value in available[key].items() if name in names
         }
     if canonical_json(available) != canonical_json(requested):
+        if available.get("history_detail") != requested.get("history_detail"):
+            raise ValueError(
+                "discovery history detail differs from cache: requested "
+                + requested["history_detail"]
+                + ", cache "
+                + available["history_detail"]
+            )
         raise ValueError("discovery settings differ from cache")
     database = _local(cache_dir, manifest["historyPath"])
     if (
