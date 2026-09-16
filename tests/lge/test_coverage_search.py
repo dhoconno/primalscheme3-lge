@@ -9,6 +9,7 @@ import pytest
 from primalscheme3.core.config import Config
 from primalscheme3.panel.coverage_search import (
     SearchOptions,
+    _Search,
     optimize_catalog,
     search_assignments,
 )
@@ -92,6 +93,90 @@ def covered(cat, assignments, metric="full-span"):
         lo, hi = c.full_interval if metric == "full-span" else c.interior_interval
         result[c.target_id].update(range(lo, hi))
     return {t: len(values) for t, values in result.items()}
+
+
+def incremental_fill(cat, *, batches, profile=None, edges=()):
+    released = set()
+    pending = iter(batches)
+
+    def refresh(search, state, phase):
+        try:
+            released.update(next(pending))
+        except StopIteration:
+            return False
+        return True
+
+    search = _Search(
+        cat,
+        profile or limits(),
+        SearchOptions(starts=1, repair_rounds=0),
+        GraphOracle(cat, edges),
+        lambda: 0,
+        candidate_source=refresh,
+        candidate_filter=released.__contains__,
+    )
+    state = search.state()
+    search.fill(state, 0, "construction:0")
+    return search, state
+
+
+def test_refresh_does_not_reattempt_consumed_zero_gain_candidate():
+    cat = graph_catalog(
+        [("A", "t", 0, 100), ("B", "t", 0, 50), ("C", "u", 0, 100)],
+        {"t": 100, "u": 100},
+    )
+    search, state = incremental_fill(cat, batches=(("A", "B"), ("C",)))
+
+    assert {a.candidate_id for a in state.items()} == {"A", "C"}
+    assert search.work["candidate_attempts"] == 3
+
+
+def test_refresh_does_not_reattempt_consumed_pool_incompatible_candidate():
+    cat = graph_catalog(
+        [("A", "t", 0, 60), ("B", "t", 60, 100), ("C", "t", 60, 100)],
+        {"t": 100},
+    )
+    search, state = incremental_fill(
+        cat, batches=(("A", "B"), ("C",)), edges=(("A", "B"),)
+    )
+
+    assert {a.candidate_id for a in state.items()} == {"A", "C"}
+    assert search.work["candidate_attempts"] == 3
+
+
+def test_refresh_does_not_reattempt_consumed_capped_candidate():
+    cat = graph_catalog(
+        [("A", "t", 0, 100), ("B", "u", 0, 100), ("C", "v", 0, 100)],
+        {"t": 100, "u": 100, "v": 100},
+    )
+    search, state = incremental_fill(
+        cat, batches=(("A", "B"), ("C",)), profile=limits(cap=1)
+    )
+
+    assert {a.candidate_id for a in state.items()} == {"A"}
+    assert search.work["candidate_attempts"] == 3
+
+
+def test_new_fill_reconsiders_candidate_rejected_by_prior_add_only_state():
+    cat = graph_catalog(
+        [("A", "t", 0, 60), ("B", "t", 60, 100)], {"t": 100}
+    )
+    search = _Search(
+        cat,
+        limits(),
+        SearchOptions(starts=1, repair_rounds=0),
+        GraphOracle(cat, edges=(("A", "B"),)),
+        lambda: 0,
+        candidate_filter=lambda ident: ident == "B",
+    )
+
+    blocked = search.state((Assignment("A", 0),))
+    search.fill(blocked, 0, "construction:0")
+    reconsidered = search.state()
+    search.fill(reconsidered, 0, "repair:0:0")
+
+    assert reconsidered.items() == (Assignment("B", 0),)
+    assert search.work["candidate_attempts"] == 2
 
 
 def independent_objective(cat, assignments, profile, metric="full-span", goal=0.9):

@@ -404,13 +404,14 @@ class _Search:
             "violations": violations,
         }
 
-    def queues(self, state, start):
+    def queues(self, state, start, attempted=()):
         queues = {t.id: [] for t in self.catalog.targets}
         rng = random.Random(self.options.seed + start)
         priority = {ident: rng.random() for ident in self.ids}
         for ident in self.ids:
             if (
                 ident not in state.assignments
+                and ident not in attempted
                 and self.valid_cache.get(ident) is not False
                 and (self.candidate_filter is None or self.candidate_filter(ident))
             ):
@@ -436,8 +437,12 @@ class _Search:
     def fill(self, state, start, phase):
         self.tick()
         self.work["constructions"] += 1
+        # Built-in construction states only add assignments, so a consumed
+        # zero-gain, capped, or incompatible candidate cannot become feasible
+        # until a later fill starts from a different state, including repair.
+        attempted = set()
         self.refresh(state, phase)
-        queues, priority = self.queues(state, start)
+        queues, priority = self.queues(state, start, attempted)
         positions = {target: 0 for target in queues}
         for _ in range(self.limits["construction_candidate_attempts"]):
             self.tick()
@@ -448,7 +453,7 @@ class _Search:
             ]
             if not active:
                 if self.refresh(state, phase):
-                    queues, priority = self.queues(state, start)
+                    queues, priority = self.queues(state, start, attempted)
                     positions = {target: 0 for target in queues}
                     continue
                 return
@@ -475,7 +480,7 @@ class _Search:
                     break
                 depth += 1
 
-            def rank(ident):
+            def rank(ident, queues=queues, positions=positions, priority=priority):
                 candidate = self.catalog.candidate_by_id[ident]
                 gain = state.gain(candidate)
                 fraction = state.fraction(candidate.target_id)
@@ -506,6 +511,7 @@ class _Search:
             )
             positions[candidate.target_id] += 1
             self.work["candidate_attempts"] += 1
+            attempted.add(ident)
             if (
                 state.gain(candidate) <= 0
                 or self.capped(state, candidate)
