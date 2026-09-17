@@ -96,6 +96,27 @@ def geometry(panel: Path) -> dict[str, object]:
     return result
 
 
+def compare_coverage(panel: Path, parent: Path) -> dict[str, object]:
+    """Cross-check native candidate ceiling and parent-to-final gains."""
+    independent = geometry(panel)
+    parent_geometry = geometry(parent)
+    native_path = panel / "gap-completion-coverage.json"
+    if not native_path.is_file():
+        return {"nativeCoveragePresent": False, "independent": independent, "parent": parent_geometry}
+    native = json.loads(native_path.read_text())
+    ceiling = native.get("candidateUnionCeiling", {})
+    checks = []
+    for target, item in independent["trimmed"].items():
+        native_item = ceiling.get(target, {})
+        native_bases = native_item.get("trimmedBases")
+        if native_bases is not None:
+            checks.append({"target": target, "independentFinalBases": item["unionBases"], "nativeCandidateUnionBases": native_bases, "finalNotAboveCeiling": item["unionBases"] <= native_bases})
+    gains = {}
+    for target, item in independent["trimmed"].items():
+        gains[target] = item["unionBases"] - parent_geometry["trimmed"].get(target, {}).get("unionBases", 0)
+    return {"nativeCoveragePresent": True, "independent": independent, "parent": parent_geometry, "candidateUnionChecks": checks, "allFinalNotAboveCeiling": all(check["finalNotAboveCeiling"] for check in checks), "trimmedGainFromParent": gains}
+
+
 def commands() -> list[str]:
     return [str(EXE), *COMMON, "--output", str(OUT / "gap-completed"), "--gap-completion-parent", str(PARENT)]
 
@@ -168,7 +189,7 @@ def run() -> dict[str, object]:
     stdout, stderr = stdout_path.read_text(), stderr_path.read_text()
     receipt = {"argv": argv, "command": shlex.join(argv), "startedAt": started_at, "wallTimeSeconds": elapsed, "exitStatus": proc.returncode, "rssBytes": peak_rss, "killReason": kill_reason, "stderr": stderr, "runtime": {"python": sys.version, "platform": platform.platform()}, "inputs": [stamp(path) for path in MSAS], "parentScientificPayloadBefore": parent_payload()}
     if output.is_dir():
-        receipt["geometry"] = geometry(output); receipt["outputs"] = [stamp(path) for path in sorted(output.rglob("*")) if path.is_file()]
+        receipt["geometry"] = geometry(output); receipt["coverageChecks"] = compare_coverage(output, PARENT); receipt["outputs"] = [stamp(path) for path in sorted(output.rglob("*")) if path.is_file()]
         audits = [path for path in output.glob("*gap*") if path.suffix == ".json"]
         receipt["nativeAudits"] = {path.name: json.loads(path.read_text()) for path in audits}
     receipt["parentScientificPayloadAfter"] = parent_payload(); receipt["parentUnchanged"] = receipt["parentScientificPayloadBefore"] == receipt["parentScientificPayloadAfter"]
@@ -178,4 +199,6 @@ def run() -> dict[str, object]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(); parser.add_argument("--run", action="store_true"); args = parser.parse_args()
     manifest = prepare(); print(json.dumps({"prepared": str(manifest), "command": shlex.join(commands())}, indent=2))
-    if args.run: print(json.dumps(run(), indent=2))
+    if args.run:
+        result = run(); print(json.dumps(result, indent=2))
+        if result["exitStatus"] != 0 or not result.get("parentUnchanged", False): raise SystemExit(1)

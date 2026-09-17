@@ -1,4 +1,6 @@
-from scripts.benchmark_gap_completion import geometry
+import json
+
+from scripts.benchmark_gap_completion import compare_coverage, geometry
 import pytest
 
 
@@ -34,3 +36,18 @@ def test_gap_completion_geometry_rejects_duplicate_reference_identifiers(tmp_pat
     (panel / "amplicon.bed").write_text("a\t0\t3\tp\t1\n")
     with pytest.raises(ValueError, match="duplicate"):
         geometry(panel)
+
+
+def test_gap_completion_compares_final_geometry_to_native_candidate_ceiling(tmp_path):
+    parent = tmp_path / "parent"
+    panel = tmp_path / "panel"
+    for path in (parent, panel): path.mkdir()
+    for path in (parent, panel):
+        (path / "reference.fasta").write_text(">a\nAAAAAAAAAA\n")
+        (path / "amplicon.bed").write_text("a\t0\t9\tp\t1\n")
+    (parent / "primertrim.amplicon.bed").write_text("a\t2\t5\tp\t1\n")
+    (panel / "primertrim.amplicon.bed").write_text("a\t2\t8\tp\t1\n")
+    (panel / "gap-completion-coverage.json").write_text(json.dumps({"candidateUnionCeiling": {"a": {"trimmedBases": 7}}}))
+    report = compare_coverage(panel, parent)
+    assert report["allFinalNotAboveCeiling"] is True
+    assert report["trimmedGainFromParent"] == {"a": 3}
