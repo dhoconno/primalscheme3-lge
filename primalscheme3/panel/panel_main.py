@@ -96,6 +96,7 @@ def _panelcreate_impl(
     workflow_started_at: float | None = None,
     invocation_state: _CoverageInvocationState | None = None,
     legacy_salvage_options: LegacySalvageOptions | None = None,
+    gap_completion_parent: pathlib.Path | None = None,
 ):
     coverage_started_at = (
         workflow_started_at if workflow_started_at is not None else monotonic()
@@ -104,6 +105,26 @@ def _panelcreate_impl(
         legacy_salvage_options is not None
         and legacy_salvage_options.mode == "bounded"
     )
+    if gap_completion_parent is not None:
+        if mode != PanelRunModes.EQUAL:
+            raise UsageError("gap completion supports only whole-MSA equal mode")
+        if legacy_salvage_options is not None:
+            raise UsageError("gap completion cannot be combined with legacy salvage")
+        from primalscheme3.panel.gap_completion import run_gap_completion
+
+        return run_gap_completion(
+            msa=msa,
+            output_dir=output_dir,
+            parent_dir=gap_completion_parent,
+            config=config,
+            pm=pm,
+            force=force,
+            offline_plots=offline_plots,
+            executed_argv=executed_argv,
+            execution_start=execution_start,
+            workflow_started_at=coverage_started_at,
+            invocation_state=invocation_state,
+        )
     if salvage_enabled:
         if config.selection_algorithm != "legacy":
             raise UsageError("legacy salvage requires --selection-algorithm legacy")
@@ -776,6 +797,7 @@ def panelcreate(
     offline_plots: bool = True,
     executed_argv: list[str] | None = None,
     legacy_salvage_options: LegacySalvageOptions | None = None,
+    gap_completion_parent: pathlib.Path | None = None,
 ):
     """Public panel entry point with durable failure evidence for coverage runs."""
 
@@ -784,7 +806,7 @@ def panelcreate(
     invocation_state = _CoverageInvocationState()
     if config.selection_algorithm in {"coverage", "allele-coverage"} or (
         legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded"
-    ):
+    ) or gap_completion_parent is not None:
         from primalscheme3.panel.coverage_provenance import capture_execution_identity
 
         execution_start = capture_execution_identity(msa)
@@ -807,6 +829,7 @@ def panelcreate(
             workflow_started_at=started_at,
             invocation_state=invocation_state,
             legacy_salvage_options=legacy_salvage_options,
+            gap_completion_parent=gap_completion_parent,
         )
     except BaseException as error:
         output = pathlib.Path(output_dir).absolute()
@@ -814,6 +837,7 @@ def panelcreate(
             (
                 config.selection_algorithm in {"coverage", "allele-coverage"}
                 or (legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded")
+                or gap_completion_parent is not None
             )
             and invocation_state.output_owned
             and not invocation_state.provenance_finalized
@@ -824,7 +848,11 @@ def panelcreate(
             inputs = [
                 {
                     "sourcePath": str(path.absolute()),
-                    "storedPath": f"work/{index:04d}-{path.name}",
+                    "storedPath": (
+                        f"work/input-{index:04d}-{path.name}"
+                        if gap_completion_parent is not None
+                        else f"work/{index:04d}-{path.name}"
+                    ),
                     "sourceIndex": index,
                 }
                 for index, path in enumerate(msa)
@@ -840,6 +868,8 @@ def panelcreate(
             )
             if legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded":
                 resolved["legacy_salvage"] = legacy_salvage_options.to_dict()
+            if gap_completion_parent is not None:
+                resolved["gap_completion_parent"] = str(pathlib.Path(gap_completion_parent).resolve())
             finalize_provenance(
                 output_dir=output,
                 argv=executed_argv or list(sys.argv),
@@ -854,6 +884,8 @@ def panelcreate(
                     "selectionAlgorithm": config.selection_algorithm,
                     "algorithm": "bounded-legacy-dimer-salvage/v1"
                     if legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded"
+                    else "bounded-legacy-gap-completion/v1"
+                    if gap_completion_parent is not None
                     else config.selection_algorithm,
                 },
                 logger=invocation_state.logger,
