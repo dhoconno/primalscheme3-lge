@@ -53,37 +53,55 @@ def source_identity() -> dict[str, Any]:
     paths = sorted((root / "primalscheme3").rglob("*.py"))
     if (root / "pyproject.toml").is_file():
         paths.append(root / "pyproject.toml")
-    files = [_descriptor(path, relative_to=root) for path in sorted(paths)]
+        files = [_descriptor(path, relative_to=root) for path in sorted(paths)]
+        semantic = json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+        try:
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            commit = None
+        try:
+            status_lines = subprocess.run(
+                ["git", "status", "--porcelain", "--untracked-files=all"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.splitlines()
+        except (OSError, subprocess.SubprocessError):
+            status_lines = []
+        return {
+            "kind": "editable-source-tree",
+            "root": str(root),
+            "gitCommit": commit,
+            "gitDirty": bool(status_lines),
+            "gitStatus": status_lines,
+            "sourceDigest": hashlib.sha256(semantic).hexdigest(),
+            "files": files,
+            "build": _descriptor(root / "pyproject.toml", relative_to=root),
+        }
+
+    package_root = root / "primalscheme3"
+    build_path = package_root / "lge-build.json"
+    if not build_path.is_file():
+        raise FileNotFoundError(f"installed PrimalScheme3 package is missing {build_path}")
+    build_data = json.loads(build_path.read_text())
+    files = [_descriptor(path, relative_to=root) for path in sorted(paths + [build_path])]
     semantic = json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
-    try:
-        commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        commit = None
-    try:
-        status_lines = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=all"],
-            cwd=root,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.splitlines()
-    except (OSError, subprocess.SubprocessError):
-        status_lines = []
     return {
-        "kind": "editable-source-tree",
+        "kind": "installed-wheel",
         "root": str(root),
-        "gitCommit": commit,
-        "gitDirty": bool(status_lines),
-        "gitStatus": status_lines,
+        "gitCommit": build_data.get("sourceCommit"),
+        "gitDirty": False,
+        "gitStatus": [],
         "sourceDigest": hashlib.sha256(semantic).hexdigest(),
         "files": files,
-        "build": _descriptor(root / "pyproject.toml", relative_to=root),
+        "build": _descriptor(build_path, relative_to=root),
     }
 
 
