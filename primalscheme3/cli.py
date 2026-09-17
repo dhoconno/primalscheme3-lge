@@ -25,6 +25,7 @@ from primalscheme3.interaction.interaction import (
     visualise_interactions,
 )
 from primalscheme3.panel.coverage_provenance import capabilities_document
+from primalscheme3.panel.gap_completion_cli import resolve_gap_completion_parent
 from primalscheme3.panel.legacy_salvage_cli import (
     LEGACY_SALVAGE_OPTION_NAMES,
     resolve_legacy_salvage_options,
@@ -414,6 +415,17 @@ def panel_create(
             dir_okay=False,
             file_okay=True,
             exists=True,
+        ),
+    ] = None,
+    gap_completion_parent: Annotated[
+        pathlib.Path | None,
+        typer.Option(
+            help="Complete uncovered reference gaps from a preserved legacy parent panel",
+            exists=True,
+            file_okay=False,
+            readable=True,
+            resolve_path=True,
+            rich_help_panel="Legacy gap completion",
         ),
     ] = None,
     input_bedfile: Annotated[
@@ -918,6 +930,19 @@ def panel_create(
                 )
         params.pop("mispriming_product_size", None)
     try:
+        gap_completion_parent = resolve_gap_completion_parent(
+            parent=gap_completion_parent,
+            selection_algorithm=selection_algorithm,
+            mode=params.get("mode", mode),
+            mapping=mapping,
+            terminal_gap_policy=params.get("terminal_gap_policy", terminal_gap_policy)
+            if params.get("terminal_gap_policy", terminal_gap_policy) is not None
+            else TerminalGapPolicy.LEGACY,
+            circular=False,
+            region_bedfile=region_bedfile,
+            input_bedfile=input_bedfile,
+            legacy_salvage=legacy_salvage,
+        )
         legacy_salvage_options = resolve_legacy_salvage_options(
             selection_algorithm=selection_algorithm,
             mode=params.get("mode", mode),
@@ -939,6 +964,7 @@ def panel_create(
         raise typer.BadParameter(str(error)) from error
     for name in LEGACY_SALVAGE_OPTION_NAMES:
         params.pop(name, None)
+    params.pop("gap_completion_parent", None)
     config = create_config_with_amplicon_bounds(params)
     mode = PanelRunModes(params["mode"])
 
@@ -963,6 +989,7 @@ def panel_create(
         offline_plots=offline_plots,
         executed_argv=list(sys.argv),
         legacy_salvage_options=legacy_salvage_options,
+        gap_completion_parent=gap_completion_parent,
     )
 
 
