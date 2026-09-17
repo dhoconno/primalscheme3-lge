@@ -6,6 +6,7 @@ import hashlib
 import json
 import shutil
 import sys
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -315,11 +316,14 @@ def _remaining_gaps(coverage: dict[str, dict[str, Any]]) -> dict[str, list[list[
 
 
 def _parent_reference(parent_dir: Path) -> dict[str, str]:
+    references: dict[str, str] = {}
     with dnaio.open(parent_dir / "reference.fasta") as records:
-        return {
-            str(getattr(record, "id", getattr(record, "name", ""))): record.sequence.upper()
-            for record in records
-        }
+        for record in records:
+            target = str(getattr(record, "id", getattr(record, "name", "")))
+            if target in references:
+                raise ValueError(f"parent reference contains duplicate target {target!r}")
+            references[target] = record.sequence.upper()
+    return references
 
 
 def _validate_parent(
@@ -422,6 +426,7 @@ def _validate_followup_output(
     local_paths: list[Path],
     config,
     expected: FollowupSelection,
+    expected_details: dict[str, tuple[int, str]],
 ) -> dict[str, Any]:
     """Replay the published follow-up independently from selector state."""
     pairs, _headers = read_bedlines_to_bedprimerpairs(output / "primer.bed")
@@ -446,13 +451,47 @@ def _validate_followup_output(
                 f"fresh follow-up validation rejected {pair.amplicon_prefix}_{pair.amplicon_number}: {result.name}"
             )
         replay.add_primer_pair_to_pool(pair, int(pair.pool), int(pair.msa_index))
+    full_rows = []
+    trimmed_rows = []
+    for pair in pairs:
+        name = f"{pair.amplicon_prefix}_{pair.amplicon_number}"
+        full_rows.append(
+            (pair.chrom_name, int(pair.fprimer.region()[0]), int(pair.rprimer.region()[1]), name, int(pair.pool) + 1)
+        )
+        trimmed_rows.append(
+            (pair.chrom_name, int(pair.fprimer.region()[1]), int(pair.rprimer.region()[0]), name, int(pair.pool) + 1)
+        )
+
+    def read_amplicon_rows(path: Path) -> list[tuple[str, int, int, str, int]]:
+        rows = []
+        for line in path.read_text().splitlines():
+            if not line.strip() or line.startswith("#"):
+                continue
+            fields = line.split("\t")
+            if len(fields) < 5:
+                raise ValueError(f"malformed published amplicon row in {path.name}")
+            rows.append((fields[0], int(fields[1]), int(fields[2]), fields[3], int(fields[4])))
+        return rows
+
+    if sorted(read_amplicon_rows(output / "amplicon.bed")) != sorted(full_rows):
+        raise ValueError("fresh follow-up validation full amplicon BED differs from primer BED")
+    if sorted(read_amplicon_rows(output / "primertrim.amplicon.bed")) != sorted(trimmed_rows):
+        raise ValueError("fresh follow-up validation trimmed amplicon BED differs from primer BED")
     actual_coverage = trimmed_coverage(msa_dict, pairs)
     expected_ids = {item.candidate_id for item in expected.accepted}
-    actual_ids = {
-        gap_candidate_id(pair, msa_dict[pair.msa_index]) for pair in pairs
-    }
+    actual_id_list = [gap_candidate_id(pair, msa_dict[pair.msa_index]) for pair in pairs]
+    duplicate_ids = [candidate_id for candidate_id, count in Counter(actual_id_list).items() if count > 1]
+    if duplicate_ids:
+        raise ValueError("fresh follow-up validation found duplicate candidate IDs")
+    actual_ids = set(actual_id_list)
     if actual_ids != expected_ids:
         raise ValueError("fresh follow-up validation does not match selected candidate IDs")
+    actual_details = {
+        gap_candidate_id(pair, msa_dict[pair.msa_index]): (int(pair.pool), f"{pair.amplicon_prefix}_{pair.amplicon_number}")
+        for pair in pairs
+    }
+    if actual_details != expected_details:
+        raise ValueError("fresh follow-up validation does not match selected pool/name mapping")
     if actual_coverage != expected.followup_coverage:
         raise ValueError("fresh follow-up validation coverage differs from the selection snapshot")
     return {
@@ -560,6 +599,9 @@ def run_gap_completion(
             progress_manager=pm,
             config=config,
         )
+    target_names = [msa_obj._chrom_name for msa_obj in msa_dict.values()]
+    if len(target_names) != len(set(target_names)):
+        raise ValueError("supplied MSAs contain duplicate target names")
     parent_pairs, parent_verification = _validate_parent(parent_dir, msa_dict, config, logger)
     parent_snapshot = output / "parent"
     parent_snapshot.mkdir(exist_ok=True)
@@ -624,8 +666,17 @@ def run_gap_completion(
                     name=msa_obj._chrom_name, sequence=generate_reference(msa_obj.array)
                 )
             )
+    expected_details = {
+        item.candidate_id: (
+            item.pool,
+            f"{pair.amplicon_prefix}_{pair.amplicon_number}",
+        )
+        for pair in candidates
+        for item in selection.accepted
+        if item.candidate_id == gap_candidate_id(pair, msa_dict[pair.msa_index])
+    }
     fresh_validation = _validate_followup_output(
-        output, msa_dict, local_paths, config, selection
+        output, msa_dict, local_paths, config, selection, expected_details
     )
     for source, baseline in zip(msa, input_baseline, strict=True):
         _assert_unchanged(Path(source).resolve(), baseline)

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import dnaio
+import pytest
 from primalschemers import FKmer, RKmer
 
 from primalscheme3.core.classes import PrimerPair
 from primalscheme3.panel.gap_completion import (
     FollowupSelection,
+    _parent_reference,
     gap_candidate_id,
     select_followup_candidates,
     trimmed_coverage,
@@ -86,3 +89,12 @@ def test_selector_records_invalid_geometry_without_sorting_error():
         {0: msa}, [], [invalid, valid], pool_count=1, admission=lambda *_: None
     )
     assert result.statuses[gap_candidate_id(invalid, msa)]["reason"] == "geometry"
+
+
+def test_parent_reference_rejects_duplicate_target_identity(tmp_path):
+    reference = tmp_path / "reference.fasta"
+    with dnaio.FastaWriter(reference) as writer:
+        writer.write(dnaio.SequenceRecord(name="target", sequence="AAAA"))
+        writer.write(dnaio.SequenceRecord(name="target", sequence="CCCC"))
+    with pytest.raises(ValueError, match="duplicate target"):
+        _parent_reference(tmp_path)
