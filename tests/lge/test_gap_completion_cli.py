@@ -1,11 +1,17 @@
 from pathlib import Path
+import sys
+from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
 
 from primalscheme3.cli import app
-from primalscheme3.panel.gap_completion_cli import resolve_gap_completion_parent
+from primalscheme3.panel.gap_completion_cli import (
+    resolve_gap_completion_parent,
+    resolve_gap_expansion_options,
+)
 
 
 def _msa(tmp_path: Path) -> Path:
@@ -39,6 +45,50 @@ def test_gap_completion_is_absent_from_ordinary_legacy_call(tmp_path):
         )
     assert result.exit_code == 0, result.output
     assert run.call_args.kwargs["gap_completion_parent"] is None
+    assert run.call_args.kwargs["gap_expansion_options"] is None
+
+
+def test_gap_expansion_forwards_bounded_options_and_parent(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+
+    @dataclass(frozen=True)
+    class FakeOptions:
+        mode: str
+        max_anchors_per_msa: int
+        max_pairs_per_msa: int
+
+    fake_module = SimpleNamespace(GapExpansionOptions=FakeOptions)
+    with patch.dict(sys.modules, {"primalscheme3.panel.gap_expansion": fake_module}):
+        with patch("primalscheme3.cli.panelcreate") as run:
+            result = CliRunner().invoke(
+                app,
+                [
+                    "panel-create", "--msa", str(_msa(tmp_path)), "--output", str(tmp_path / "expanded"),
+                    "--selection-algorithm", "legacy", "--mode", "equal", "--mapping", "first",
+                    "--gap-completion-parent", str(parent), "--gap-expansion", "bounded",
+                    "--gap-expansion-max-anchors-per-msa", "12", "--gap-expansion-max-pairs-per-msa", "7",
+                ],
+            )
+    assert result.exit_code == 0, result.output
+    options = run.call_args.kwargs["gap_expansion_options"]
+    assert options == FakeOptions("bounded", 12, 7)
+
+
+def test_gap_expansion_advanced_options_require_bounded_mode(tmp_path):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    with patch("primalscheme3.cli.panelcreate"):
+        result = CliRunner().invoke(
+            app,
+            [
+                "panel-create", "--msa", str(_msa(tmp_path)), "--output", str(tmp_path / "bad"),
+                "--selection-algorithm", "legacy", "--mode", "equal", "--mapping", "first",
+                "--gap-completion-parent", str(parent), "--gap-expansion-max-pairs-per-msa", "7",
+            ],
+        )
+    assert result.exit_code != 0
+    assert "require --gap-expansion bounded" in result.output
 
 
 @pytest.mark.parametrize(

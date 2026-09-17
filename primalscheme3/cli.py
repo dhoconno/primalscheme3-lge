@@ -25,7 +25,11 @@ from primalscheme3.interaction.interaction import (
     visualise_interactions,
 )
 from primalscheme3.panel.coverage_provenance import capabilities_document
-from primalscheme3.panel.gap_completion_cli import resolve_gap_completion_parent
+from primalscheme3.panel.gap_completion_cli import (
+    GAP_EXPANSION_OPTION_NAMES,
+    resolve_gap_completion_parent,
+    resolve_gap_expansion_options,
+)
 from primalscheme3.panel.legacy_salvage_cli import (
     LEGACY_SALVAGE_OPTION_NAMES,
     resolve_legacy_salvage_options,
@@ -425,6 +429,29 @@ def panel_create(
             file_okay=False,
             readable=True,
             resolve_path=True,
+            rich_help_panel="Legacy gap completion",
+        ),
+    ] = None,
+    gap_expansion: Annotated[
+        str | None,
+        typer.Option(
+            help="Opt-in bounded candidate expansion for legacy gap completion: off or bounded",
+            rich_help_panel="Legacy gap completion",
+        ),
+    ] = None,
+    gap_expansion_max_anchors_per_msa: Annotated[
+        int | None,
+        typer.Option(
+            help="Gap-expansion anchor evaluation budget per MSA; default 2000",
+            min=1,
+            rich_help_panel="Legacy gap completion",
+        ),
+    ] = None,
+    gap_expansion_max_pairs_per_msa: Annotated[
+        int | None,
+        typer.Option(
+            help="Gap-expansion added-pair evaluation budget per MSA; default 1000",
+            min=1,
             rich_help_panel="Legacy gap completion",
         ),
     ] = None,
@@ -943,6 +970,12 @@ def panel_create(
             input_bedfile=input_bedfile,
             legacy_salvage=legacy_salvage,
         )
+        gap_expansion_options = resolve_gap_expansion_options(
+            mode=gap_expansion,
+            parent=gap_completion_parent,
+            max_anchors_per_msa=gap_expansion_max_anchors_per_msa,
+            max_pairs_per_msa=gap_expansion_max_pairs_per_msa,
+        )
         legacy_salvage_options = resolve_legacy_salvage_options(
             selection_algorithm=selection_algorithm,
             mode=params.get("mode", mode),
@@ -963,6 +996,8 @@ def panel_create(
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error
     for name in LEGACY_SALVAGE_OPTION_NAMES:
+        params.pop(name, None)
+    for name in GAP_EXPANSION_OPTION_NAMES:
         params.pop(name, None)
     params.pop("gap_completion_parent", None)
     config = create_config_with_amplicon_bounds(params)
@@ -990,6 +1025,7 @@ def panel_create(
         executed_argv=list(sys.argv),
         legacy_salvage_options=legacy_salvage_options,
         gap_completion_parent=gap_completion_parent,
+        gap_expansion_options=gap_expansion_options,
     )
 
 
