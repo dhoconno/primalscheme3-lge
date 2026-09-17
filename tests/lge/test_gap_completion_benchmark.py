@@ -1,6 +1,6 @@
 import json
 
-from scripts.benchmark_gap_completion import compare_coverage, geometry
+from scripts.benchmark_gap_completion import combined_geometry, compare_coverage, geometry
 import pytest
 
 
@@ -51,3 +51,19 @@ def test_gap_completion_compares_final_geometry_to_native_candidate_ceiling(tmp_
     report = compare_coverage(panel, parent)
     assert report["allFinalNotAboveCeiling"] is True
     assert report["trimmedGainFromParent"] == {"a": 3}
+
+
+def test_gap_completion_combined_geometry_unions_parent_and_followup(tmp_path):
+    parent = tmp_path / "parent"
+    panel = tmp_path / "panel"
+    for path in (parent, panel):
+        path.mkdir()
+        (path / "reference.fasta").write_text(">a\nAAAAAAAAAA\n")
+        (path / "amplicon.bed").write_text("a\t0\t2\tparent\t1\n")
+    (parent / "primertrim.amplicon.bed").write_text("a\t0\t3\tparent\t1\n")
+    (panel / "primertrim.amplicon.bed").write_text("a\t2\t7\tfollowup\t1\n")
+    (panel / "amplicon.bed").write_text("a\t1\t4\tfollowup\t1\n")
+    report = combined_geometry(panel, parent)
+    assert report["trimmed"]["a"]["intervals"] == [[0, 7]]
+    assert report["trimmed"]["a"]["unionBases"] == 7
+    assert report["full"]["a"]["intervals"] == [[0, 4]]

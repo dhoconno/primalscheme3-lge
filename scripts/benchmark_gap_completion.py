@@ -96,9 +96,25 @@ def geometry(panel: Path) -> dict[str, object]:
     return result
 
 
+def combined_geometry(panel: Path, parent: Path) -> dict[str, object]:
+    """Union follow-up BED intervals with the preserved parent BED intervals."""
+    result = geometry(panel); lengths = result["referenceLengths"]
+    for filename, key in (("primertrim.amplicon.bed", "trimmed"), ("amplicon.bed", "full")):
+        follow = bed_intervals(panel / filename); primary = bed_intervals(parent / filename)
+        for target, length in lengths.items():
+            merged = union(primary.get(target, []) + follow.get(target, [])); bases = sum(e - s for s, e in merged)
+            gaps = []; cursor = 0
+            for start, end in merged:
+                if cursor < start: gaps.append([cursor, start])
+                cursor = max(cursor, end)
+            if cursor < length: gaps.append([cursor, length])
+            result[key][target] = {"intervals": [list(x) for x in merged], "unionBases": bases, "referenceLength": length, "percentReferenceCovered": 100 * bases / length if length else 0.0, "gaps": gaps}
+    return result
+
+
 def compare_coverage(panel: Path, parent: Path) -> dict[str, object]:
     """Cross-check native candidate ceiling and parent-to-final gains."""
-    independent = geometry(panel)
+    independent = combined_geometry(panel, parent)
     parent_geometry = geometry(parent)
     native_path = panel / "gap-completion-coverage.json"
     if not native_path.is_file():
@@ -107,7 +123,7 @@ def compare_coverage(panel: Path, parent: Path) -> dict[str, object]:
     ceiling = native.get("candidateUnionCeiling", {})
     checks = []
     for target, item in independent["trimmed"].items():
-        native_item = ceiling.get(target, {})
+        native_item = ceiling.get(str(list(independent["referenceLengths"]).index(target)), ceiling.get(target, {}))
         native_bases = native_item.get("trimmedBases")
         if native_bases is not None:
             checks.append({"target": target, "independentFinalBases": item["unionBases"], "nativeCandidateUnionBases": native_bases, "finalNotAboveCeiling": item["unionBases"] <= native_bases})
