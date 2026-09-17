@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 from collections import Counter, defaultdict, deque
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -242,7 +243,7 @@ def expand_gap_candidates(msa, primary_coverage, config, options: GapExpansionOp
     for gap_id, (_msa_index, start, end) in enumerate(gaps):
         made = 0
         truncated = False
-        families: list[deque[tuple[_Oligo, _Oligo]]] = []
+        families: list[Iterator[tuple[_Oligo, _Oligo]]] = []
         for f_anchor in _spatial_order(sorted(oligos["f"])):
             for r_anchor in _spatial_order(sorted(oligos["r"])):
                 if len(families) >= per_gap_quota:
@@ -258,43 +259,53 @@ def expand_gap_candidates(msa, primary_coverage, config, options: GapExpansionOp
                     f_by_row[item.row_index].append(item)
                 for item in oligos["r"][r_anchor]:
                     r_by_row[item.row_index].append(item)
-                family: deque[tuple[_Oligo, _Oligo]] = deque()
-                for row_index in sorted(set(f_by_row) & set(r_by_row)):
-                    for f_item in f_by_row[row_index]:
-                        for r_item in r_by_row[row_index]:
-                            fkmer = _make_kmer(msa, f_item)
-                            rkmer = _make_kmer(msa, r_item)
-                            if fkmer is None or rkmer is None:
-                                statuses["unrepresentable-footprint"] += 1
-                                continue
-                            if not _pair_geometry_passes(fkmer, rkmer, config):
-                                statuses["amplicon-size-rejected"] += 1
-                                continue
-                            pair_key = (
-                                f_item.sequence,
-                                r_item.sequence,
-                                f_item.anchor,
-                                r_item.anchor,
-                            )
-                            if pair_key in pair_task_seen:
-                                continue
-                            pair_task_seen.add(pair_key)
-                            family.append((f_item, r_item))
-                if family:
-                    families.append(family)
+                common_rows = sorted(set(f_by_row) & set(r_by_row))
+
+                def family_pairs(
+                    common_rows=common_rows,
+                    f_by_row=f_by_row,
+                    r_by_row=r_by_row,
+                ) -> Iterator[tuple[_Oligo, _Oligo]]:
+                    for row_index in common_rows:
+                        for f_item in f_by_row[row_index]:
+                            for r_item in r_by_row[row_index]:
+                                fkmer = _make_kmer(msa, f_item)
+                                rkmer = _make_kmer(msa, r_item)
+                                if fkmer is None or rkmer is None:
+                                    statuses["unrepresentable-footprint"] += 1
+                                    continue
+                                if not _pair_geometry_passes(fkmer, rkmer, config):
+                                    statuses["amplicon-size-rejected"] += 1
+                                    continue
+                                pair_key = (
+                                    f_item.sequence,
+                                    r_item.sequence,
+                                    f_item.anchor,
+                                    r_item.anchor,
+                                )
+                                if pair_key in pair_task_seen:
+                                    continue
+                                pair_task_seen.add(pair_key)
+                                yield f_item, r_item
+
+                if common_rows:
+                    families.append(family_pairs())
             if len(families) >= per_gap_quota:
                 break
         # One member from each anchor-pair family per round prevents a single
         # early family with many row/length variants consuming the gap quota.
         while families and made < per_gap_quota:
-            next_families: list[deque[tuple[_Oligo, _Oligo]]] = []
+            next_families: list[Iterator[tuple[_Oligo, _Oligo]]] = []
             for family in families:
-                if not family or made >= per_gap_quota:
-                    continue
-                pair_tasks[gap_id].append(family.popleft())
-                made += 1
-                if family:
+                if made >= per_gap_quota:
                     next_families.append(family)
+                    continue
+                try:
+                    pair_tasks[gap_id].append(next(family))
+                except StopIteration:
+                    continue
+                made += 1
+                next_families.append(family)
             families = next_families
         if families:
             truncated = True
@@ -349,7 +360,11 @@ def expand_gap_candidates(msa, primary_coverage, config, options: GapExpansionOp
         "anchorTasksEvaluated": len(attempted_anchor_tasks),
         "anchorTasksNotExplored": max(0, len(tasks) - len(attempted_anchor_tasks)),
         "pairAttempts": attempted_pairs,
-        "pairChecksNotExplored": sum(len(queue) for queue in pair_tasks.values()),
+        "pairChecksNotExplored": (
+            None
+            if any(pair_search_truncated.values())
+            else sum(len(queue) for queue in pair_tasks.values())
+        ),
         "pairSearchTruncatedByGap": pair_search_truncated,
         "statusCounts": dict(sorted(statuses.items())),
         "candidateCount": len(candidates),

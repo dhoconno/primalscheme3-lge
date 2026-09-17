@@ -697,14 +697,15 @@ def run_gap_completion(
                     name=msa_obj._chrom_name, sequence=generate_reference(msa_obj.array)
                 )
             )
+    # Replay the actual selected objects.  Candidate generation can contain a
+    # legacy and expanded duplicate ID; deriving this map from all candidates
+    # would let an unselected duplicate overwrite the published name.
     expected_details = {
-        item.candidate_id: (
-            item.pool,
+        gap_candidate_id(pair, msa_dict[pair.msa_index]): (
+            int(pair.pool),
             f"{pair.amplicon_prefix}_{pair.amplicon_number}",
         )
-        for pair in candidates
-        for item in selection.accepted
-        if item.candidate_id == gap_candidate_id(pair, msa_dict[pair.msa_index])
+        for pair in followup.all_primerpairs()
     }
     fresh_validation = _validate_followup_output(
         output, msa_dict, local_paths, config, selection, expected_details
@@ -823,6 +824,13 @@ def run_gap_completion(
             "algorithm": "bounded-legacy-gap-completion/v1",
             "parent": report["parent"],
             "coverage": coverage_report,
+            "gapExpansion": {
+                "report": "gap-completion.json",
+                "coverage": "gap-completion-coverage.json",
+                "mode": options.mode,
+                "maxAnchorsPerMsa": options.max_anchors_per_msa,
+                "maxPairsPerMsa": options.max_pairs_per_msa,
+            },
         },
         logger=logger,
         execution_start=execution_start,
