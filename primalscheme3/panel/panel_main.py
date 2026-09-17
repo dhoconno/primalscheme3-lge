@@ -97,6 +97,7 @@ def _panelcreate_impl(
     invocation_state: _CoverageInvocationState | None = None,
     legacy_salvage_options: LegacySalvageOptions | None = None,
     gap_completion_parent: pathlib.Path | None = None,
+    gap_expansion_options: object | None = None,
 ):
     coverage_started_at = (
         workflow_started_at if workflow_started_at is not None else monotonic()
@@ -105,6 +106,8 @@ def _panelcreate_impl(
         legacy_salvage_options is not None
         and legacy_salvage_options.mode == "bounded"
     )
+    if gap_expansion_options is not None and getattr(gap_expansion_options, "mode", "off") == "bounded" and gap_completion_parent is None:
+        raise UsageError("gap expansion requires --gap-completion-parent")
     if gap_completion_parent is not None:
         if mode != PanelRunModes.EQUAL:
             raise UsageError("gap completion supports only whole-MSA equal mode")
@@ -124,6 +127,7 @@ def _panelcreate_impl(
             execution_start=execution_start,
             workflow_started_at=coverage_started_at,
             invocation_state=invocation_state,
+            gap_expansion_options=gap_expansion_options,
         )
     if salvage_enabled:
         if config.selection_algorithm != "legacy":
@@ -798,6 +802,7 @@ def panelcreate(
     executed_argv: list[str] | None = None,
     legacy_salvage_options: LegacySalvageOptions | None = None,
     gap_completion_parent: pathlib.Path | None = None,
+    gap_expansion_options: object | None = None,
 ):
     """Public panel entry point with durable failure evidence for coverage runs."""
 
@@ -805,8 +810,11 @@ def panelcreate(
     execution_start = None
     invocation_state = _CoverageInvocationState()
     if config.selection_algorithm in {"coverage", "allele-coverage"} or (
-        legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded"
-    ) or gap_completion_parent is not None:
+            legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded"
+    ) or gap_completion_parent is not None or (
+        gap_expansion_options is not None
+        and getattr(gap_expansion_options, "mode", "off") == "bounded"
+    ):
         from primalscheme3.panel.coverage_provenance import capture_execution_identity
 
         execution_start = capture_execution_identity(msa)
@@ -830,6 +838,7 @@ def panelcreate(
             invocation_state=invocation_state,
             legacy_salvage_options=legacy_salvage_options,
             gap_completion_parent=gap_completion_parent,
+            gap_expansion_options=gap_expansion_options,
         )
     except BaseException as error:
         output = pathlib.Path(output_dir).absolute()
@@ -838,6 +847,10 @@ def panelcreate(
                 config.selection_algorithm in {"coverage", "allele-coverage"}
                 or (legacy_salvage_options is not None and legacy_salvage_options.mode == "bounded")
                 or gap_completion_parent is not None
+                or (
+                    gap_expansion_options is not None
+                    and getattr(gap_expansion_options, "mode", "off") == "bounded"
+                )
             )
             and invocation_state.output_owned
             and not invocation_state.provenance_finalized
@@ -870,6 +883,12 @@ def panelcreate(
                 resolved["legacy_salvage"] = legacy_salvage_options.to_dict()
             if gap_completion_parent is not None:
                 resolved["gap_completion_parent"] = str(pathlib.Path(gap_completion_parent).resolve())
+            if gap_expansion_options is not None:
+                resolved["gap_expansion"] = {
+                    "mode": getattr(gap_expansion_options, "mode", "off"),
+                    "max_anchors_per_msa": getattr(gap_expansion_options, "max_anchors_per_msa", None),
+                    "max_pairs_per_msa": getattr(gap_expansion_options, "max_pairs_per_msa", None),
+                }
             finalize_provenance(
                 output_dir=output,
                 argv=executed_argv or list(sys.argv),

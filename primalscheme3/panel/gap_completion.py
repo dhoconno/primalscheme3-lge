@@ -6,7 +6,7 @@ import hashlib
 import json
 import shutil
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +21,10 @@ from primalscheme3.core.mapping import generate_reference
 from primalscheme3.core.mismatches import MatchDB
 from primalscheme3.core.msa import MSA
 from primalscheme3.core.multiplex import Multiplex
+from primalscheme3.panel.gap_expansion import (
+    GapExpansionOptions,
+    expand_gap_candidates,
+)
 
 
 @dataclass(frozen=True)
@@ -521,6 +525,7 @@ def run_gap_completion(
     execution_start: dict[str, Any] | None = None,
     workflow_started_at: float | None = None,
     invocation_state=None,
+    gap_expansion_options: GapExpansionOptions | None = None,
 ) -> None:
     """Create independent follow-up pools for a completed primary scheme."""
     started_at = workflow_started_at if workflow_started_at is not None else monotonic()
@@ -622,6 +627,11 @@ def run_gap_completion(
             raise ValueError(f"copied parent file does not match source: {name}")
 
     candidates = []
+    primary_coverage = _coverage(msa_dict, parent_pairs)
+    options = gap_expansion_options or GapExpansionOptions()
+    expansion_reports = []
+    candidate_sources: dict[str, set[str]] = defaultdict(set)
+    expanded_candidate_evidence: dict[str, dict[str, Any]] = {}
     for msa_obj in msa_dict.values():
         msa_obj.digest_rs(config, None)
         msa_obj.generate_primerpairs(
@@ -631,6 +641,27 @@ def run_gap_completion(
             amplicon_size_metric=config.amplicon_size_metric,
         )
         candidates.extend(msa_obj.primerpairs)
+        for pair in msa_obj.primerpairs:
+            candidate_sources[gap_candidate_id(pair, msa_obj)].add("legacy")
+        if options.mode == "bounded":
+            expansion = expand_gap_candidates(
+                msa_obj,
+                primary_coverage,
+                config,
+                options,
+            )
+            candidates.extend(expansion.candidates)
+            for pair in expansion.candidates:
+                candidate_sources[gap_candidate_id(pair, msa_obj)].add("gap-expanded")
+            expanded_candidate_evidence.update(
+                {
+                    gap_candidate_id(pair, msa_obj): evidence
+                    for pair, evidence in zip(expansion.candidates, expansion.evidence, strict=True)
+                }
+            )
+            expansion_reports.append(
+                {"msaIndex": int(msa_obj.msa_index), **expansion.report}
+            )
     match_db = MatchDB(
         output / "work" / "mismatch",
         [str(path) for path in local_paths] if config.use_matchdb else [],
@@ -714,8 +745,11 @@ def run_gap_completion(
             "fullInterval": list(intervals[1]) if intervals else None,
             "forwardOligos": sorted(str(seq).upper() for seq in pair.fprimer.seqs()),
             "reverseOligos": sorted(str(seq).upper() for seq in pair.rprimer.seqs()),
+            "source": "+".join(sorted(candidate_sources.get(candidate_id, {"legacy"}))),
             **status,
         }
+        if candidate_id in expanded_candidate_evidence:
+            record["expansionEvidence"] = expanded_candidate_evidence[candidate_id]
         accepted = accepted_by_id.get(candidate_id)
         if accepted is not None:
             record.update(
@@ -746,6 +780,14 @@ def run_gap_completion(
             "poolIds": [f"followup-pool-{pool + 1}" for pool in range(config.n_pools)],
         },
         "candidateManifest": manifest,
+        "gapExpansion": {
+            "options": {
+                "mode": options.mode,
+                "maxAnchorsPerMsa": options.max_anchors_per_msa,
+                "maxPairsPerMsa": options.max_pairs_per_msa,
+            },
+            "perMsa": expansion_reports,
+        },
         "coverage": coverage_report,
     }
     (output / "gap-completion.json").write_text(
@@ -758,6 +800,9 @@ def run_gap_completion(
             "gap_completion_pool_count": int(config.n_pools),
             "gap_completion_report": "gap-completion.json",
             "gap_completion_coverage": "gap-completion-coverage.json",
+            "gap_expansion_mode": options.mode,
+            "gap_expansion_max_anchors_per_msa": options.max_anchors_per_msa,
+            "gap_expansion_max_pairs_per_msa": options.max_pairs_per_msa,
         }
     )
     (output / "config.json").write_text(json.dumps(config_dict, sort_keys=True))

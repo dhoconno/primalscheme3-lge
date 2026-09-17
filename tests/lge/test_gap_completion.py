@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import dnaio
@@ -7,6 +9,8 @@ import pytest
 from primalschemers import FKmer, RKmer
 
 from primalscheme3.core.classes import PrimerPair
+from primalscheme3.core.config import Config, MappingType, TerminalGapPolicy
+from primalscheme3.core.progress_tracker import ProgressManager
 from primalscheme3.panel.gap_completion import (
     FollowupSelection,
     _parent_reference,
@@ -14,6 +18,12 @@ from primalscheme3.panel.gap_completion import (
     select_followup_candidates,
     trimmed_coverage,
 )
+from primalscheme3.panel.gap_expansion import (
+    GapExpansionOptions,
+    _anchor_tasks,
+    _spatial_order,
+)
+from primalscheme3.panel.panel_main import PanelRunModes, panelcreate
 
 
 def pair(start: int, end: int, forward: str = "A" * 20, reverse: str = "C" * 20):
@@ -98,3 +108,41 @@ def test_parent_reference_rejects_duplicate_target_identity(tmp_path):
         writer.write(dnaio.SequenceRecord(name="target", sequence="CCCC"))
     with pytest.raises(ValueError, match="duplicate target"):
         _parent_reference(tmp_path)
+
+
+def test_bounded_gap_expansion_records_anchor_and_pair_work(tmp_path):
+    msa = Path("tests/core/test_mismatch.fasta").resolve()
+    config = Config(
+        selection_algorithm="legacy",
+        mapping=MappingType.FIRST,
+        terminal_gap_policy=TerminalGapPolicy.LEGACY,
+        n_pools=2,
+    )
+    config.use_matchdb = False
+    parent = tmp_path / "parent"
+    panelcreate(
+        msa=[msa], output_dir=parent, config=config, pm=ProgressManager(),
+        mode=PanelRunModes.EQUAL, offline_plots=False,
+    )
+    output = tmp_path / "expanded"
+    panelcreate(
+        msa=[msa], output_dir=output, config=config, pm=ProgressManager(),
+        mode=PanelRunModes.EQUAL, offline_plots=False,
+        gap_completion_parent=parent,
+        gap_expansion_options=GapExpansionOptions(
+            mode="bounded", max_anchors_per_msa=20, max_pairs_per_msa=10
+        ),
+    )
+    report = json.loads((output / "gap-completion.json").read_text())
+    assert report["gapExpansion"]["options"]["mode"] == "bounded"
+    assert report["gapExpansion"]["options"]["maxAnchorsPerMsa"] == 20
+
+
+def test_gap_anchor_cap_interleaves_windows_directions_and_spatial_positions():
+    msa = target(200)
+    config = SimpleNamespace(amplicon_size_max=20)
+    tasks = _anchor_tasks(msa, [(0, 10, 20), (0, 120, 130)], config)
+    assert {(gap, direction) for gap, direction, _anchor in tasks[:4]} == {
+        (0, "f"), (0, "r"), (1, "f"), (1, "r")
+    }
+    assert _spatial_order(list(range(0, 41, 10)))[:2] == [20, 0]
