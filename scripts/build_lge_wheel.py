@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 
 UPSTREAM_COMMIT = 'dd13ec5cb1cf375f052640355c73101c0c4bf839'
 
@@ -45,10 +46,12 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     if any(output.iterdir()):
         raise SystemExit('Output directory must be empty')
+    project = tomllib.loads((root / 'pyproject.toml').read_text())['project']
+    version = project['version']
     metadata = {
         'schemaVersion': 1,
         'distribution': 'primalscheme3',
-        'version': '3.3.0+lge.2',
+        'version': version,
         'sourceRepository': 'https://github.com/dhoconno/primalscheme3-lge',
         'sourceCommit': commit,
         'upstreamRepository': 'https://github.com/artic-network/primalscheme3',
