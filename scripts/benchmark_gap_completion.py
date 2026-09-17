@@ -46,10 +46,12 @@ def parent_payload() -> dict[str, dict[str, object]]:
 
 
 def fasta_lengths(path: Path) -> dict[str, int]:
-    result = {}; current = None
+    result = {}; seen = set(); current = None
     for line in path.read_text().splitlines():
         if line.startswith(">"):
-            current = line[1:].split()[0]; result[current] = 0
+            current = line[1:].split()[0]
+            if current in seen: raise ValueError(f"duplicate reference identifier: {current}")
+            seen.add(current); result[current] = 0
         elif current is not None:
             result[current] += len(line.strip().replace("-", ""))
     return result
@@ -77,6 +79,12 @@ def geometry(panel: Path) -> dict[str, object]:
     result = {"referenceLengths": lengths}
     for filename, key in (("primertrim.amplicon.bed", "trimmed"), ("amplicon.bed", "full")):
         by_target = bed_intervals(panel / filename); result[key] = {}
+        unknown = set(by_target) - set(lengths)
+        if unknown: raise ValueError(f"{filename}: unknown targets {sorted(unknown)}")
+        for target, intervals in by_target.items():
+            for start, end in intervals:
+                if start < 0 or end <= start or end > lengths[target]:
+                    raise ValueError(f"{filename}: invalid interval {target}:{start}-{end}")
         for target, length in lengths.items():
             merged = union(by_target.get(target, [])); bases = sum(e - s for s, e in merged)
             gaps = []; cursor = 0
@@ -98,6 +106,25 @@ def prepare() -> Path:
         item = stamp(path)
         if item["sha256"] != digest or item["sizeBytes"] != size: raise RuntimeError(f"input receipt mismatch: {path}")
     if not PARENT.is_dir(): raise RuntimeError(f"missing preserved parent: {PARENT}")
+    parent_refs = fasta_lengths(PARENT / "reference.fasta")
+    parent_sequences = {}
+    current = None
+    for line in (PARENT / "reference.fasta").read_text().splitlines():
+        if line.startswith(">"):
+            current = line[1:].split()[0]; parent_sequences[current] = ""
+        elif current is not None:
+            parent_sequences[current] += line.strip().upper()
+    parent_sequences = {key: value.replace("-", "") for key, value in parent_sequences.items()}
+    for msa in MSAS:
+        headers, rows, current = [], [], None
+        for line in msa.read_text().splitlines():
+            if line.startswith(">"):
+                headers.append(line[1:].split()[0]); rows.append(""); current = len(rows) - 1
+            elif current is not None: rows[current] += line.strip().upper()
+        if not rows: raise RuntimeError(f"empty MSA: {msa}")
+        first = "".join(rows[0].replace("-", "")); normalized = headers[0].replace("-", "_")
+        if parent_refs.get(normalized) != len(first) or parent_sequences.get(normalized) != first:
+            raise RuntimeError(f"parent reference differs from original first row: {msa}")
     OUT.mkdir(parents=True)
     manifest = {
         "schemaVersion": "lge.mhc-a1-a2-gap-completion-benchmark/v1",
@@ -116,7 +143,7 @@ def run() -> dict[str, object]:
     stdout_path, stderr_path = OUT / "gap-completed.stdout.log", OUT / "gap-completed.stderr.log"
     stdout_file, stderr_file = stdout_path.open("w"), stderr_path.open("w")
     proc = subprocess.Popen(argv, cwd=Path(__file__).resolve().parents[1], stdout=stdout_file, stderr=stderr_file, start_new_session=True)
-    peak_rss = 0; deadline = started + 600
+    peak_rss = 0; deadline = started + 600; kill_reason = None
     try:
         import psutil
     except ImportError:
@@ -128,14 +155,18 @@ def run() -> dict[str, object]:
                 peak_rss = max(peak_rss, sum([process.memory_info().rss, *(child.memory_info().rss for child in process.children(recursive=True))]))
             except psutil.Error: pass
         else:
-            try: peak_rss = max(peak_rss, int(subprocess.check_output(["ps", "-o", "rss=", "-p", str(proc.pid)], text=True).strip() or 0) * 1024)
+            try:
+                rows = subprocess.check_output(["ps", "-axo", "pid=,pgid=,rss="], text=True).splitlines()
+                pgid = str(proc.pid); peak_rss = max(peak_rss, sum(int(row.split()[2]) for row in rows if len(row.split()) >= 3 and row.split()[1] == pgid) * 1024)
             except (ValueError, subprocess.SubprocessError): pass
-        if time.monotonic() >= deadline or peak_rss > 8 * 1024**3:
-            os.killpg(proc.pid, 9); break
+        if time.monotonic() >= deadline:
+            kill_reason = "timeout"; os.killpg(proc.pid, 9); break
+        if peak_rss > 8 * 1024**3:
+            kill_reason = "rss"; os.killpg(proc.pid, 9); break
         time.sleep(0.25)
     proc.wait(); stdout_file.close(); stderr_file.close(); elapsed = time.monotonic() - started
     stdout, stderr = stdout_path.read_text(), stderr_path.read_text()
-    receipt = {"argv": argv, "command": shlex.join(argv), "startedAt": started_at, "wallTimeSeconds": elapsed, "exitStatus": proc.returncode, "rssBytes": peak_rss, "stderr": stderr, "runtime": {"python": sys.version, "platform": platform.platform()}, "inputs": [stamp(path) for path in MSAS], "parentScientificPayloadBefore": parent_payload()}
+    receipt = {"argv": argv, "command": shlex.join(argv), "startedAt": started_at, "wallTimeSeconds": elapsed, "exitStatus": proc.returncode, "rssBytes": peak_rss, "killReason": kill_reason, "stderr": stderr, "runtime": {"python": sys.version, "platform": platform.platform()}, "inputs": [stamp(path) for path in MSAS], "parentScientificPayloadBefore": parent_payload()}
     if output.is_dir():
         receipt["geometry"] = geometry(output); receipt["outputs"] = [stamp(path) for path in sorted(output.rglob("*")) if path.is_file()]
         audits = [path for path in output.glob("*gap*") if path.suffix == ".json"]
