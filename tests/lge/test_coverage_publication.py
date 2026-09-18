@@ -29,6 +29,7 @@ from primalscheme3.panel.coverage_provenance import (
     capture_execution_identity,
     finalize_provenance,
 )
+import primalscheme3.panel.coverage_provenance as coverage_provenance
 from primalscheme3.panel.coverage_types import Assignment
 
 REFERENCE = "ACGTTGCAACGTCAGTACGATCGTAGCTAGCATCGATGCTAGCTACGATCGTACGATGCATGCA"
@@ -80,6 +81,44 @@ def _snapshot(msa):
         tuple((k.end, tuple(k.seqs()), tuple(k.counts())) for k in msa.fkmers),
         tuple((k.start, tuple(k.seqs()), tuple(k.counts())) for k in msa.rkmers),
     )
+
+
+def test_installed_source_identity_is_self_contained_and_digest_tracks_package_files(
+    tmp_path, monkeypatch
+):
+    """A wheel must not depend on an absent pyproject or enclosing repository."""
+    package = tmp_path / "primalscheme3"
+    package.mkdir()
+    module = package / "installed_module.py"
+    module.write_text("VALUE = 1\n")
+    build = package / "lge-build.json"
+    build.write_text(
+        json.dumps(
+            {
+                "schemaVersion": "primalscheme3.lge-build/v1",
+                "version": "3.3.0+lge.5",
+                "sourceCommit": "source-commit",
+            }
+        )
+    )
+    monkeypatch.setattr(coverage_provenance, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        coverage_provenance.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("installed identity must not invoke git")
+        ),
+    )
+
+    first = coverage_provenance.source_identity()
+    assert first["kind"] == "installed-wheel"
+    assert first["gitCommit"] == "source-commit"
+    assert first["build"]["path"] == "primalscheme3/lge-build.json"
+    assert not (tmp_path / "pyproject.toml").exists()
+
+    module.write_text("VALUE = 2\n")
+    second = coverage_provenance.source_identity()
+    assert second["sourceDigest"] != first["sourceDigest"]
 
 
 def test_detached_publication_preserves_clouds_gaps_and_shared_objects(tmp_path):
